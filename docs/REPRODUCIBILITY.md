@@ -29,6 +29,7 @@ At the time this scaffold was created, the author project repository exposed onl
 - CasADi `3.7.2`
 - do-mpc `5.1.1`
 - Safe Panda Gym compatibility fork commit `97a7bbf6c619e5e20ba3bde3c5f423b435a3062a`
+- Upstream compatibility pull request: `https://github.com/tohsin/Safe-panda-gym/pull/1`
 
 These versions document this reproduction environment; the paper itself does not report exact package versions.
 
