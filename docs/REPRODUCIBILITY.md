@@ -28,7 +28,7 @@ At the time this scaffold was created, the author project repository exposed onl
 
 - CasADi `3.7.2`
 - do-mpc `5.1.1`
-- Safe Panda Gym compatibility fork commit `97a7bbf6c619e5e20ba3bde3c5f423b435a3062a`
+- Safe Panda Gym compatibility fork commit `c2c2bae9ee0b738fd7c5a5f6259a3a37da95718c`
 - Upstream compatibility pull request: `https://github.com/tohsin/Safe-panda-gym/pull/1`
 
 These versions document this reproduction environment; the paper itself does not report exact package versions.
@@ -40,6 +40,7 @@ These versions document this reproduction environment; the paper itself does not
 - All 20 safety-aware environment variants (five tasks, sparse/dense rewards, and end-effector/joint control) reset and execute one headless Gymnasium step successfully.
 - The compatibility fork removes stale `gym`/`gym_robotics` runtime imports, restores five safe environment exports, fixes the accidental `StackSafeStack3` registration, and preserves the safety cost in the Gymnasium `info` mapping.
 - These smoke tests verify API execution, not equivalence to the unpublished scene, obstacle dynamics, prompts, or controller used for the paper figures.
+- `PandaBuildL-v3` restores the four-cube, translucent-target scene shown in the fork's `build-l.png`; reset, step, and 720x480 headless rendering are verified on Gymnasium.
 
 ## Explicit assumptions
 

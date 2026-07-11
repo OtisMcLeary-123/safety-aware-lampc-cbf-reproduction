@@ -43,6 +43,16 @@ python scripts/run_safe_panda_mpc_cbf.py --gamma 0.10
 
 The default scene places a spherical unsafe region on the straight line from the initial end-effector pose to the goal. A deterministic Task-Planner-style route supplies two safe low-level waypoints around the obstacle; fixed-gamma MPC-CBF solves every control step and enforces the exclusion radius. Results are written under `artifacts/mpc_cbf_demo/`.
 
+## Render the Build-L scene
+
+```bash
+source .venv/bin/activate
+python scripts/render_build_l_scene.py
+```
+
+This recreates the repository's four colored cubes and translucent L-shaped target layout using the restored `PandaBuildL-v3` Gymnasium environment.
+
+
 ## Reproducibility boundary
 
 The repository reproduces the mathematical controller and simulation setup from the published description. The authors' public project repository currently contains no implementation beyond its README, so this is a clean-room reproduction rather than a bit-for-bit rerun. Prompt text, unpublished assets, environment schema, object geometry, and other details not supplied by the paper are documented as explicit assumptions.
