@@ -23,7 +23,7 @@ python -m pip install -e '.[dev,simulation]'
 python -m pytest -q
 ```
 
-The simulation extra pins do-mpc and CasADi and installs the paper-cited Safe Panda Gym fork at a fixed commit. The controller/solver stack runs on Python 3.12, but the cited fork's safe environments currently have an upstream compatibility defect described in `docs/REPRODUCIBILITY.md`.
+The simulation extra pins do-mpc and CasADi and installs a tested compatibility fork of the paper-cited Safe Panda Gym repository at a fixed commit. The compatibility patch restores the safe environment exports and migrates their runtime API to Gymnasium on Python 3.12.
 
 ## Implemented components
 
@@ -38,3 +38,4 @@ The simulation extra pins do-mpc and CasADi and installs the paper-cited Safe Pa
 The repository reproduces the mathematical controller and simulation setup from the published description. The authors' public project repository currently contains no implementation beyond its README, so this is a clean-room reproduction rather than a bit-for-bit rerun. Prompt text, unpublished assets, environment schema, object geometry, and other details not supplied by the paper are documented as explicit assumptions.
 
 See [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md) for the evidence boundary and remaining validation work.
+See [docs/CLEAN_ROOM_STRATEGY.md](docs/CLEAN_ROOM_STRATEGY.md) for the reconstruction strategy required while the authors' controller and prompt code remain unavailable.

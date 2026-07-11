@@ -28,18 +28,17 @@ At the time this scaffold was created, the author project repository exposed onl
 
 - CasADi `3.7.2`
 - do-mpc `5.1.1`
-- Safe Panda Gym commit `f6cf3031f489f2f11c9e9274f3a17dda5670a649`
+- Safe Panda Gym compatibility fork commit `97a7bbf6c619e5e20ba3bde3c5f423b435a3062a`
 
 These versions document this reproduction environment; the paper itself does not report exact package versions.
 
 ## Verified environment status
 
-- Editable installation with CasADi 3.7.2, do-mpc 5.1.1, Gymnasium 1.3.0, PyBullet 3.2.7, and the locked Safe Panda commit succeeds on Python 3.12.
+- Installation with CasADi 3.7.2, do-mpc 5.1.1, Gymnasium 1.3.0, PyBullet 3.2.7, and the locked Safe Panda compatibility commit succeeds on Python 3.12.
 - The full project suite passes with the real CasADi/do-mpc/IPOPT stack.
-- A headless reset of `PandaReachSafe-v3` and `PandaPickAndPlaceSafe-v3` fails inside the cited fork before this project's adapter is entered. The fork's `panda_gym/envs/__init__.py` imports `PandaStack3Env`, but the merged `panda_tasks.py` does not define that class. Its safe core also retains imports of legacy `gym` and `gym_robotics` despite the package declaring Gymnasium.
-- Revision `6ba05d59b65bbf1dafc2cbec5060eb77fa2ad852`, before the upstream Gymnasium merge, contains the safe environment classes but declares Gym 0.22-0.23 and Python 3.7-3.9 era dependencies. It is not directly compatible with the current Python 3.12 environment.
-
-The simulator smoke gate therefore remains open. A faithful next step is either a Python 3.9 legacy container using the pre-merge revision or a narrowly documented compatibility fork. The installed third-party package is not patched in place because such a change would be irreproducible.
+- All 20 safety-aware environment variants (five tasks, sparse/dense rewards, and end-effector/joint control) reset and execute one headless Gymnasium step successfully.
+- The compatibility fork removes stale `gym`/`gym_robotics` runtime imports, restores five safe environment exports, fixes the accidental `StackSafeStack3` registration, and preserves the safety cost in the Gymnasium `info` mapping.
+- These smoke tests verify API execution, not equivalence to the unpublished scene, obstacle dynamics, prompts, or controller used for the paper figures.
 
 ## Explicit assumptions
 
@@ -50,11 +49,10 @@ The simulator smoke gate therefore remains open. A faithful next step is either 
 
 ## Remaining verification gates
 
-1. Resolve the cited Safe Panda fork's legacy/merged API incompatibility in a pinned Python 3.9 container or a documented compatibility fork.
-2. Select and validate the concrete Safe Panda task/environment schema.
-3. Connect the CBF constraint builder to the do-mpc controller for the selected observation schema.
-4. Run a headless deterministic collision-avoidance smoke episode.
-5. Recreate the gamma sweep and compare minimum obstacle clearance qualitatively with Figure 5.
-6. Run 50-episode feedback/no-feedback ablations only after intervention timing and LLM latency policies are specified.
+1. Select and validate the concrete Safe Panda task/environment schema for the paper's cube-picking scene.
+2. Connect the CBF constraint builder to the do-mpc controller for the selected observation schema.
+3. Run a deterministic closed-loop collision-avoidance episode, beyond the verified one-step environment smoke tests.
+4. Recreate the gamma sweep and compare minimum obstacle clearance qualitatively with Figure 5.
+5. Run 50-episode feedback/no-feedback ablations only after intervention timing and LLM latency policies are specified.
 
-Until gates 1-4 pass, the project is an implementation scaffold, not a validated reproduction of the paper's results.
+Until the first three remaining gates pass, the project is a validated component implementation, not a validated reproduction of the paper's results.

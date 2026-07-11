@@ -14,7 +14,7 @@ dev = ["pytest>=8"]
 simulation = [
     "casadi==3.7.2",
     "do-mpc==5.1.1",
-    "panda-gym @ git+https://github.com/tohsin/Safe-panda-gym.git@f6cf3031f489f2f11c9e9274f3a17dda5670a649",
+    "panda-gym @ git+https://github.com/OtisMcLeary-123/Safe-panda-gym.git@97a7bbf6c619e5e20ba3bde3c5f423b435a3062a",
 ]
 
 [tool.pytest.ini_options]
