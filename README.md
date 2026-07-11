@@ -52,6 +52,15 @@ python scripts/render_build_l_scene.py
 
 This recreates the repository's four colored cubes and translucent L-shaped target layout using the restored `PandaBuildL-v3` Gymnasium environment.
 
+## Run sequential Build-L manipulation
+
+```bash
+source .venv/bin/activate
+python scripts/run_build_l_mpc_cbf.py --gamma 0.15
+```
+
+The state machine opens the gripper, approaches a cube, descends, closes and attaches it, lifts, transports, places, releases, and retreats. Free-space motion is solved by MPC-CBF; the deterministic grasp abstraction uses a fixed PyBullet constraint because the legacy Build-L environment does not provide a stable grasp primitive.
+
 
 ## Reproducibility boundary
 
