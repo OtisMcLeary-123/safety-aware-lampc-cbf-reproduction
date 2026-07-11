@@ -84,3 +84,25 @@ def test_controller_builds_with_optional_stack() -> None:
     assert model.u["u"].shape == (4, 1)
     assert mpc.settings.n_horizon == 15
     assert mpc.settings.t_step == pytest.approx(0.04)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("do_mpc") is None
+    or importlib.util.find_spec("casadi") is None,
+    reason="do-mpc/CasADi control extras are not installed",
+)
+def test_controller_model_hook_can_declare_tvp() -> None:
+    def declare(model, x, u, ca):
+        del x, u, ca
+        model.set_variable("_tvp", "moving_center", shape=(3, 1))
+
+    def configure(model, mpc, x, u, ca):
+        del model, x, u, ca
+        template = mpc.get_tvp_template()
+        mpc.set_tvp_fun(lambda _: template)
+
+    model, _ = build_mpc_controller(
+        model_builders=(declare,), constraint_builders=(configure,)
+    )
+
+    assert model.tvp["moving_center"].shape == (3, 1)

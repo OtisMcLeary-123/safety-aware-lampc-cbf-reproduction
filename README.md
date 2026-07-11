@@ -12,7 +12,10 @@ The implementation follows the paper's reported stack:
 
 ## Status
 
-Work in progress. The mathematical components and simulator adapter are implemented and covered by unit tests; a paper-scale closed-loop experiment is not yet validated.
+The mathematical components, simulator adapter, static and dynamic obstacle
+experiments, and sequential Build-L demonstration are implemented and covered
+by unit tests. This remains a clean-room reconstruction because the authors'
+controller source is not public.
 
 ## Install
 
@@ -33,6 +36,8 @@ The simulation extra pins do-mpc and CasADi and installs a tested compatibility 
 - Safe Panda Gym adapter with deterministic seeding, 0.67 s zero-order-held obstacle sensing, and 0.005 m Gaussian measurement noise.
 - Typed configuration and a dry-run CLI that never sends prompts or credentials externally.
 - Deterministic Safe Panda MPC-CBF demo with rendered frames, trajectory/clearance plot, GIF, and JSON metrics.
+- Paper-aligned moving spherical obstacle with constant velocity, noisy 0.67 s
+  zero-order-held sensing, and an online do-mpc TVP CBF constraint.
 
 ## Render the MPC-CBF demo
 
@@ -42,6 +47,20 @@ python scripts/run_safe_panda_mpc_cbf.py --gamma 0.10
 ```
 
 The default scene places a spherical unsafe region on the straight line from the initial end-effector pose to the goal. A deterministic Task-Planner-style route supplies two safe low-level waypoints around the obstacle; fixed-gamma MPC-CBF solves every control step and enforces the exclusion radius. Results are written under `artifacts/mpc_cbf_demo/`.
+
+## Run the dynamic-obstacle CBF experiment
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python scripts/run_dynamic_obstacle_mpc_cbf.py
+```
+
+The red sphere crosses the robot's route at constant Cartesian velocity. Its
+position is measured every 0.67 s with 0.005 m Gaussian noise. Between sensor
+updates, the measured center is held as a do-mpc TVP and replicated across the
+15-step prediction horizon, matching the paper's stated static-within-horizon
+assumption. The result folder contains an animation, rendered montage, safety
+plot, and full JSON trace.
 
 ## Render the Build-L scene
 

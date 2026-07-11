@@ -115,6 +115,13 @@ The hook is called after the do-mpc model and MPC object exist but before
 ``mpc.setup()``.  It is intended for the CasADi specialist's CBF constraints.
 """
 
+ModelBuilder = Callable[[Any, Any, Any, Any], None]
+"""Hook signature: ``builder(model, x, u, casadi)``.
+
+The hook runs before ``model.setup()`` so callers can declare time-varying
+parameters (TVPs) required by online CBF constraints.
+"""
+
 
 def _load_control_stack() -> tuple[Any, Any]:
     try:
@@ -132,6 +139,7 @@ def _load_control_stack() -> tuple[Any, Any]:
 def build_mpc_controller(
     config: PaperMPCConfig | None = None,
     *,
+    model_builders: Sequence[ModelBuilder] = (),
     constraint_builders: Sequence[ConstraintBuilder] = (),
     suppress_solver_output: bool = True,
 ) -> tuple[Any, Any]:
@@ -157,6 +165,8 @@ def build_mpc_controller(
     a = ca.DM(a_values)
     b = ca.DM(b_values)
     model.set_rhs("x", ca.mtimes(a, x) + ca.mtimes(b, u))
+    for builder in model_builders:
+        builder(model, x, u, ca)
     model.setup()
 
     mpc = do_mpc.controller.MPC(model)
