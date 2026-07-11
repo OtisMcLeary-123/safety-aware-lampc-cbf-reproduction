@@ -47,6 +47,7 @@ These versions document this reproduction environment; the paper itself does not
 - The Safe Panda fork does not provide a paper-specific environment ID or a stable observation schema for this experiment. The adapter therefore accepts an environment ID and extraction/mapping callbacks.
 - Obstacle radius, gripper collision radius, initial poses, targets, prompt templates, and obstacle trajectory must be supplied by an experiment configuration.
 - The solver acceptance layer is fail-closed: missing diagnostics, infeasibility, excessive constraint residual, invalid action shape, or non-finite action values prevent application of the candidate control.
+- The paper input bound `[-0.2, 0.2]` is mapped linearly to Safe Panda's normalized Cartesian action interval `[-1, 1]`; the paper does not publish its simulator action adapter.
 
 ## Remaining verification gates
 

@@ -32,6 +32,16 @@ The simulation extra pins do-mpc and CasADi and installs a tested compatibility 
 - IPOPT options, diagnostics, and fail-closed control acceptance policy.
 - Safe Panda Gym adapter with deterministic seeding, 0.67 s zero-order-held obstacle sensing, and 0.005 m Gaussian measurement noise.
 - Typed configuration and a dry-run CLI that never sends prompts or credentials externally.
+- Deterministic Safe Panda MPC-CBF demo with rendered frames, trajectory/clearance plot, GIF, and JSON metrics.
+
+## Render the MPC-CBF demo
+
+```bash
+source .venv/bin/activate
+python scripts/run_safe_panda_mpc_cbf.py --gamma 0.10
+```
+
+The default scene places a spherical unsafe region on the straight line from the initial end-effector pose to the goal. A deterministic Task-Planner-style route supplies two safe low-level waypoints around the obstacle; fixed-gamma MPC-CBF solves every control step and enforces the exclusion radius. Results are written under `artifacts/mpc_cbf_demo/`.
 
 ## Reproducibility boundary
 
