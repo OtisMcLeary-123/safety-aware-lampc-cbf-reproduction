@@ -11,6 +11,11 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+simulation = [
+    "casadi==3.7.2",
+    "do-mpc==5.1.1",
+    "panda-gym @ git+https://github.com/tohsin/Safe-panda-gym.git@f6cf3031f489f2f11c9e9274f3a17dda5670a649",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
