@@ -21,6 +21,7 @@ def test_paper_dimensions_and_default_parameters() -> None:
     assert len(INPUT_NAMES) == 4
     assert config.dt == pytest.approx(0.04)
     assert config.horizon == 15
+    assert not config.uses_jerk_state
     assert config.delta_u_weights == pytest.approx((0.5, 0.5, 0.5, 1e-5))
     assert config.input_lower == pytest.approx((-0.2, -0.2, -0.2, -math.pi))
     assert config.input_upper == pytest.approx((0.2, 0.2, 0.2, math.pi))
@@ -106,3 +107,14 @@ def test_controller_model_hook_can_declare_tvp() -> None:
     )
 
     assert model.tvp["moving_center"].shape == (3, 1)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("do_mpc") is None
+    or importlib.util.find_spec("casadi") is None,
+    reason="do-mpc/CasADi control extras are not installed",
+)
+def test_controller_builds_augmented_jerk_state() -> None:
+    model, _ = build_mpc_controller(PaperMPCConfig(linear_jerk_weight=0.1))
+
+    assert model.x["x"].shape == (12, 1)

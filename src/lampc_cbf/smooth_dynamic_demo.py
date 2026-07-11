@@ -1,0 +1,429 @@
+"""Continuous-reference MPC-CBF experiment and smoothness ablation primitive."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import json
+from pathlib import Path
+from time import perf_counter
+from typing import Any, Sequence
+
+from .smoothness import SmoothnessMetrics
+
+
+@dataclass(frozen=True, slots=True)
+class SmoothDynamicConfig:
+    delta_u_weight: float = 0.5
+    jerk_weight: float = 0.0
+    gamma: float = 0.10
+    seed: int = 11
+    max_steps: int = 260
+    render_stride: int = 2
+    save_animation: bool = False
+    sensor_period: float = 0.67
+    measurement_noise_sigma: float = 0.005
+    reference_speed: float = 0.12
+    goal_offset: tuple[float, float, float] = (0.0, 0.30, 0.0)
+    obstacle_start_offset: tuple[float, float, float] = (-0.12, 0.15, 0.0)
+    obstacle_velocity: tuple[float, float, float] = (0.06, 0.0, 0.0)
+    obstacle_radius: float = 0.10
+    collision_radius: float = 0.035
+    route_margin: float = 0.08
+    output_dir: str = "artifacts/smoothness_ablation/spline_du_0.5"
+
+    def __post_init__(self) -> None:
+        if self.delta_u_weight < 0.0 or self.jerk_weight < 0.0:
+            raise ValueError("smoothness weights must be non-negative")
+        if not 0.0 < self.gamma <= 0.15:
+            raise ValueError("paper experiment requires 0 < gamma <= 0.15")
+        if self.max_steps < 1 or self.render_stride < 1:
+            raise ValueError("step counts must be positive")
+        if self.sensor_period <= 0.0 or self.reference_speed <= 0.0:
+            raise ValueError("period and reference speed must be positive")
+        if self.measurement_noise_sigma < 0.0:
+            raise ValueError("measurement noise must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class SmoothDynamicResult:
+    reached_goal: bool
+    collision: bool
+    steps: int
+    sensor_updates: int
+    minimum_true_clearance: float
+    minimum_measured_clearance: float
+    final_goal_distance: float
+    mean_solve_time: float
+    max_solve_time: float
+    smoothness: SmoothnessMetrics
+    output_dir: str
+
+
+class ReferenceObstacleTVP:
+    """One TVP provider for the B-spline reference and held obstacle sensor."""
+
+    def __init__(
+        self,
+        reference_path: Any,
+        initial_obstacle_measurement: Sequence[float],
+        *,
+        reference_speed: float,
+        obstacle_radius: float,
+        collision_radius: float,
+        gamma: float,
+        dt: float,
+        horizon: int,
+    ) -> None:
+        import numpy as np
+
+        self.reference_path = np.asarray(reference_path, dtype=float)
+        if self.reference_path.ndim != 2 or self.reference_path.shape[1] != 3:
+            raise ValueError("reference_path must have shape (samples, 3)")
+        self.measurement = np.asarray(
+            initial_obstacle_measurement, dtype=float
+        ).reshape(3)
+        self.reference_speed = reference_speed
+        self.combined_radius = obstacle_radius + collision_radius
+        self.gamma = gamma
+        self.dt = dt
+        self.horizon = horizon
+        segment_lengths = np.linalg.norm(
+            np.diff(self.reference_path, axis=0), axis=1
+        )
+        self.arc_length = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+        self.progress_index = 0
+        self._obstacle_tvp = None
+        self._reference_tvp = None
+
+    def update(
+        self, robot_position: Sequence[float], obstacle_measurement: Sequence[float]
+    ) -> None:
+        import numpy as np
+
+        position = np.asarray(robot_position, dtype=float).reshape(3)
+        measurement = np.asarray(obstacle_measurement, dtype=float).reshape(3)
+        if not np.all(np.isfinite(position)) or not np.all(np.isfinite(measurement)):
+            raise ValueError("TVP updates must be finite 3-vectors")
+        # A short backward allowance prevents numerical tracking noise from
+        # permanently skipping the closest point while progress remains monotone.
+        start = max(0, self.progress_index - 4)
+        distances = np.linalg.norm(self.reference_path[start:] - position, axis=1)
+        nearest = start + int(np.argmin(distances))
+        self.progress_index = max(self.progress_index, nearest)
+        self.measurement = measurement.copy()
+
+    def declare(self, model: Any, x: Any, u: Any, ca: Any) -> None:
+        del x, u, ca
+        self._obstacle_tvp = model.set_variable(
+            "_tvp", "obstacle_position", shape=(3, 1)
+        )
+        self._reference_tvp = model.set_variable(
+            "_tvp", "reference_state", shape=(8, 1)
+        )
+
+    def configure(self, model: Any, mpc: Any, x: Any, u: Any, ca: Any) -> None:
+        import numpy as np
+
+        del model, u
+        if self._obstacle_tvp is None or self._reference_tvp is None:
+            raise RuntimeError("declare must run before configure")
+        position = x[:3]
+        next_position = position + self.dt * x[4:7]
+        h_current = (
+            ca.sumsqr(position - self._obstacle_tvp) - self.combined_radius**2
+        )
+        h_next = (
+            ca.sumsqr(next_position - self._obstacle_tvp) - self.combined_radius**2
+        )
+        mpc.set_nl_cons(
+            "dynamic_obstacle_cbf",
+            (1.0 - self.gamma) * h_current - h_next,
+            ub=0.0,
+        )
+        template = mpc.get_tvp_template()
+
+        def tvp_fun(t_now: float) -> Any:
+            del t_now
+            base_distance = self.arc_length[self.progress_index]
+            for stage in range(self.horizon + 1):
+                target_distance = min(
+                    self.arc_length[-1],
+                    base_distance + stage * self.dt * self.reference_speed,
+                )
+                index = int(
+                    min(
+                        len(self.reference_path) - 1,
+                        np.searchsorted(self.arc_length, target_distance, side="left"),
+                    )
+                )
+                point = self.reference_path[index]
+                next_index = min(index + 1, len(self.reference_path) - 1)
+                tangent = self.reference_path[next_index] - point
+                tangent_norm = float(np.linalg.norm(tangent))
+                desired_velocity = (
+                    tangent / tangent_norm * self.reference_speed
+                    if tangent_norm > 1e-9 and index < len(self.reference_path) - 1
+                    else np.zeros(3)
+                )
+                reference_state = np.concatenate(
+                    [point, [0.0], desired_velocity, [0.0]]
+                )
+                template["_tvp", stage, "obstacle_position"] = (
+                    self.measurement.reshape(3, 1)
+                )
+                template["_tvp", stage, "reference_state"] = (
+                    reference_state.reshape(8, 1)
+                )
+            return template
+
+        mpc.set_tvp_fun(tvp_fun)
+
+
+def run_smooth_dynamic_demo(
+    config: SmoothDynamicConfig | None = None,
+) -> SmoothDynamicResult:
+    """Run one continuous-reference MPC-CBF variant and write raw evidence."""
+
+    import gymnasium as gym
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from PIL import Image
+
+    import panda_gym  # noqa: F401
+
+    from .controller import PaperMPCConfig, build_mpc_controller
+    from .demo import paper_control_to_safe_panda_action
+    from .smoothness import (
+        calculate_smoothness_metrics,
+        make_reference_bspline,
+        make_visual_smoothing_spline,
+    )
+
+    cfg = config or SmoothDynamicConfig()
+    rng = np.random.default_rng(cfg.seed)
+    wrapped_env = gym.make(
+        "PandaReachSafe-v3", render_mode="rgb_array", renderer="Tiny"
+    )
+    env = wrapped_env.unwrapped
+    output_dir = Path(cfg.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    frames: list[Any] = []
+    positions: list[Any] = []
+    true_obstacles: list[Any] = []
+    measured_obstacles: list[Any] = []
+    controls: list[Any] = []
+    true_clearances: list[float] = []
+    measured_clearances: list[float] = []
+    goal_distances: list[float] = []
+    solve_times: list[float] = []
+    sensor_update_steps: list[int] = [0]
+
+    try:
+        observation, _ = env.reset(seed=cfg.seed)
+        start = np.asarray(observation["achieved_goal"], dtype=float)
+        goal = start + np.asarray(cfg.goal_offset, dtype=float)
+        true_obstacle = start + np.asarray(cfg.obstacle_start_offset, dtype=float)
+        obstacle_velocity = np.asarray(cfg.obstacle_velocity, dtype=float)
+        hidden_obstacle = np.array([2.0, 2.0, -1.0])
+        quaternion = np.array([0.0, 0.0, 0.0, 1.0])
+        task = env.task
+        task.goal = goal.copy()
+        task.unsafe_region_radius = cfg.obstacle_radius
+        task.unsafe_state_1_pos = true_obstacle.copy()
+        task.unsafe_state_2_pos = hidden_obstacle.copy()
+        env.sim.set_base_pose("target", goal, quaternion)
+        env.sim.set_base_pose("unsafe_region_1", true_obstacle, quaternion)
+        env.sim.set_base_pose("unsafe_region_2", hidden_obstacle, quaternion)
+        observation = env._get_obs()
+
+        combined_radius = cfg.obstacle_radius + cfg.collision_radius
+        route_offset = combined_radius + cfg.route_margin
+        route_direction = -1.0 if obstacle_velocity[0] >= 0.0 else 1.0
+        route_points = np.asarray(
+            [
+                start,
+                start + np.array([route_direction * route_offset, 0.075, 0.0]),
+                start + np.array([route_direction * route_offset, 0.225, 0.0]),
+                goal,
+            ]
+        )
+        reference_path = make_reference_bspline(route_points)
+        measurement = true_obstacle + rng.normal(
+            0.0, cfg.measurement_noise_sigma, size=3
+        )
+        mpc_config = PaperMPCConfig(
+            linear_delta_u_weight=cfg.delta_u_weight,
+            linear_jerk_weight=cfg.jerk_weight,
+            target_tvp_name="reference_state",
+        )
+        tvp = ReferenceObstacleTVP(
+            reference_path,
+            measurement,
+            reference_speed=cfg.reference_speed,
+            obstacle_radius=cfg.obstacle_radius,
+            collision_radius=cfg.collision_radius,
+            gamma=cfg.gamma,
+            dt=mpc_config.dt,
+            horizon=mpc_config.horizon,
+        )
+        _, mpc = build_mpc_controller(
+            mpc_config,
+            model_builders=(tvp.declare,),
+            constraint_builders=(tvp.configure,),
+        )
+        previous_control = np.zeros(4)
+        previous_increment = np.zeros(4)
+        initial_state = np.concatenate([start, [0.0], previous_control])
+        if mpc_config.uses_jerk_state:
+            initial_state = np.concatenate([initial_state, previous_increment])
+        mpc.x0 = initial_state.reshape(-1, 1)
+        mpc.set_initial_guess()
+        reached_goal = False
+        collision = False
+        next_sensor_time = cfg.sensor_period
+
+        for step_index in range(cfg.max_steps):
+            elapsed = step_index * mpc_config.dt
+            if elapsed + 1e-12 >= next_sensor_time:
+                measurement = true_obstacle + rng.normal(
+                    0.0, cfg.measurement_noise_sigma, size=3
+                )
+                sensor_update_steps.append(step_index)
+                next_sensor_time += cfg.sensor_period
+
+            position = np.asarray(observation["achieved_goal"], dtype=float)
+            tvp.update(position, measurement)
+            measured_state = np.concatenate([position, [0.0], previous_control])
+            if mpc_config.uses_jerk_state:
+                measured_state = np.concatenate([measured_state, previous_increment])
+            started = perf_counter()
+            candidate = np.asarray(
+                mpc.make_step(measured_state.reshape(-1, 1)), dtype=float
+            ).reshape(-1)
+            solve_times.append(perf_counter() - started)
+            if candidate.shape != (4,) or not np.all(np.isfinite(candidate)):
+                raise RuntimeError("MPC returned an invalid control vector")
+            action = paper_control_to_safe_panda_action(
+                candidate, env.action_space.shape[0],
+                linear_input_limit=mpc_config.linear_input_limit,
+            )
+            observation, _, terminated, truncated, _ = env.step(action)
+            previous_increment = candidate - previous_control
+            previous_control = candidate
+
+            true_obstacle = true_obstacle + obstacle_velocity * mpc_config.dt
+            env.sim.set_base_pose("unsafe_region_1", true_obstacle, quaternion)
+            task.unsafe_state_1_pos = true_obstacle.copy()
+            position = np.asarray(observation["achieved_goal"], dtype=float)
+            true_clearance = float(
+                np.linalg.norm(position - true_obstacle) - combined_radius
+            )
+            measured_clearance = float(
+                np.linalg.norm(position - measurement) - combined_radius
+            )
+            goal_distance = float(np.linalg.norm(position - goal))
+            positions.append(position.copy())
+            true_obstacles.append(true_obstacle.copy())
+            measured_obstacles.append(measurement.copy())
+            controls.append(candidate.copy())
+            true_clearances.append(true_clearance)
+            measured_clearances.append(measured_clearance)
+            goal_distances.append(goal_distance)
+            if cfg.save_animation and step_index % cfg.render_stride == 0:
+                frame = env.render()
+                if frame is not None:
+                    frames.append(np.asarray(frame, dtype=np.uint8))
+            collision = collision or true_clearance < 0.0
+            reached_goal = bool(terminated) or goal_distance < 0.05
+            if reached_goal or collision or truncated:
+                break
+
+        if len(positions) < 4:
+            raise RuntimeError("experiment produced too few samples")
+        raw_positions = np.asarray(positions)
+        true_array = np.asarray(true_obstacles)
+        measured_array = np.asarray(measured_obstacles)
+        controls_array = np.asarray(controls)
+        smoothness = calculate_smoothness_metrics(raw_positions, mpc_config.dt)
+        visual_spline = make_visual_smoothing_spline(raw_positions)
+        time = np.arange(1, len(raw_positions) + 1) * mpc_config.dt
+
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
+        axes[0].plot(
+            raw_positions[:, 0], raw_positions[:, 1], color="steelblue",
+            alpha=0.4, linewidth=1.0, label="raw trajectory (safety truth)",
+        )
+        axes[0].plot(
+            visual_spline[:, 0], visual_spline[:, 1], color="navy",
+            linewidth=2.0, label="visual smoothing spline",
+        )
+        axes[0].plot(
+            reference_path[:, 0], reference_path[:, 1], "--", color="green",
+            linewidth=1.2, label="continuous B-spline reference",
+        )
+        axes[0].plot(true_array[:, 0], true_array[:, 1], "r--", label="obstacle")
+        axes[0].scatter(start[0], start[1], c="black", label="start")
+        axes[0].scatter(goal[0], goal[1], c="green", marker="*", s=140, label="goal")
+        axes[0].set_aspect("equal", adjustable="box")
+        axes[0].set_xlabel("x [m]")
+        axes[0].set_ylabel("y [m]")
+        axes[0].set_title("Raw, visual spline, and MPC reference")
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend(fontsize=7)
+
+        axes[1].plot(time, true_clearances, label="raw true clearance")
+        axes[1].plot(time, measured_clearances, label="raw measured clearance")
+        axes[1].axhline(0.0, color="red", linestyle="--", label="collision boundary")
+        axes[1].set_xlabel("time [s]")
+        axes[1].set_ylabel("clearance [m]")
+        axes[1].set_title("Safety metrics use raw trajectory only")
+        axes[1].grid(True, alpha=0.3)
+        axes[1].legend(fontsize=8)
+        fig.savefig(output_dir / "raw_smoothed_and_safety.png", dpi=160)
+        plt.close(fig)
+
+        if frames:
+            gif_frames = [Image.fromarray(frame) for frame in frames]
+            gif_frames[0].save(
+                output_dir / "robot_motion.gif", save_all=True,
+                append_images=gif_frames[1:], duration=80, loop=0, optimize=True,
+            )
+
+        result = SmoothDynamicResult(
+            reached_goal=reached_goal,
+            collision=collision,
+            steps=len(raw_positions),
+            sensor_updates=len(sensor_update_steps),
+            minimum_true_clearance=float(min(true_clearances)),
+            minimum_measured_clearance=float(min(measured_clearances)),
+            final_goal_distance=float(goal_distances[-1]),
+            mean_solve_time=float(np.mean(solve_times)),
+            max_solve_time=float(np.max(solve_times)),
+            smoothness=smoothness,
+            output_dir=str(output_dir),
+        )
+        payload = {
+            "config": asdict(cfg),
+            "result": {**asdict(result), "smoothness": smoothness.as_dict()},
+            "safety_metric_source": "raw simulated end-effector positions only",
+            "visual_spline_is_safety_evidence": False,
+            "start": start.tolist(), "goal": goal.tolist(),
+            "route_points": route_points.tolist(),
+            "reference_path": reference_path.tolist(),
+            "sensor_update_steps": sensor_update_steps,
+            "positions": raw_positions.tolist(),
+            "visual_spline": visual_spline.tolist(),
+            "true_obstacles": true_array.tolist(),
+            "measured_obstacles": measured_array.tolist(),
+            "controls": controls_array.tolist(),
+            "true_clearances": true_clearances,
+            "measured_clearances": measured_clearances,
+            "goal_distances": goal_distances,
+            "solve_times": solve_times,
+        }
+        (output_dir / "metrics.json").write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+        return result
+    finally:
+        wrapped_env.close()

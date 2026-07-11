@@ -34,6 +34,9 @@ class PaperMPCConfig:
     q_weight: float = 1.0
     linear_delta_u_weight: float = 0.5
     yaw_delta_u_weight: float = 1e-5
+    linear_jerk_weight: float = 0.0
+    yaw_jerk_weight: float = 0.0
+    target_tvp_name: str | None = None
     velocity_regularization: float = 0.1
     yaw_regularization: float = 5e-5
     position_lower: tuple[float, float, float] = (-3.0, -3.0, 0.0)
@@ -55,6 +58,8 @@ class PaperMPCConfig:
             self.q_weight,
             self.linear_delta_u_weight,
             self.yaw_delta_u_weight,
+            self.linear_jerk_weight,
+            self.yaw_jerk_weight,
             self.velocity_regularization,
             self.yaw_regularization,
         )
@@ -62,6 +67,12 @@ class PaperMPCConfig:
             raise ValueError("objective weights must be non-negative")
         if self.linear_input_limit <= 0.0 or self.yaw_input_limit <= 0.0:
             raise ValueError("input limits must be positive")
+        if self.target_tvp_name == "":
+            raise ValueError("target_tvp_name must be non-empty when provided")
+
+    @property
+    def uses_jerk_state(self) -> bool:
+        return self.linear_jerk_weight > 0.0 or self.yaw_jerk_weight > 0.0
 
     @property
     def state_lower(self) -> tuple[float, ...]:
@@ -159,12 +170,21 @@ def build_mpc_controller(
     do_mpc, ca = _load_control_stack()
 
     model = do_mpc.model.Model("discrete")
-    x = model.set_variable(var_type="_x", var_name="x", shape=(8, 1))
+    state_dimension = 12 if cfg.uses_jerk_state else 8
+    x = model.set_variable(
+        var_type="_x", var_name="x", shape=(state_dimension, 1)
+    )
     u = model.set_variable(var_type="_u", var_name="u", shape=(4, 1))
     a_values, b_values = paper_dynamics_matrices(cfg.dt)
     a = ca.DM(a_values)
     b = ca.DM(b_values)
-    model.set_rhs("x", ca.mtimes(a, x) + ca.mtimes(b, u))
+    paper_state_rhs = ca.mtimes(a, x[:8]) + ca.mtimes(b, u)
+    if cfg.uses_jerk_state:
+        # The four augmented states retain the previous input increment.
+        # This makes Δ²u available symbolically at every prediction stage.
+        model.set_rhs("x", ca.vertcat(paper_state_rhs, u - x[4:8]))
+    else:
+        model.set_rhs("x", paper_state_rhs)
     for builder in model_builders:
         builder(model, x, u, ca)
     model.setup()
@@ -185,13 +205,25 @@ def build_mpc_controller(
         nlpsol_opts=nlpsol_opts,
     )
 
-    target = ca.DM(cfg.target)
-    error = x - target
+    target = (
+        model.tvp[cfg.target_tvp_name]
+        if cfg.target_tvp_name is not None
+        else ca.DM(cfg.target)
+    )
+    error = x[:8] - target
     velocity_regularizer = cfg.velocity_regularization * ca.dot(x[4:7], x[4:7])
     yaw_regularizer = cfg.yaw_regularization * ca.sin(2.0 * x[3]) ** 2
     state_cost = cfg.q_weight * ca.dot(error, error)
     terminal_cost = state_cost + velocity_regularizer + yaw_regularizer
-    mpc.set_objective(mterm=terminal_cost, lterm=terminal_cost)
+    stage_cost = terminal_cost
+    if cfg.uses_jerk_state:
+        input_increment = u - x[4:8]
+        jerk = input_increment - x[8:12]
+        stage_cost += (
+            cfg.linear_jerk_weight * ca.dot(jerk[:3], jerk[:3])
+            + cfg.yaw_jerk_weight * jerk[3] ** 2
+        )
+    mpc.set_objective(mterm=terminal_cost, lterm=stage_cost)
     delta_u = u - mpc.u_prev["u"]
     delta_u_cost = (
         cfg.linear_delta_u_weight * ca.dot(delta_u[:3], delta_u[:3])
@@ -200,8 +232,10 @@ def build_mpc_controller(
     # A symbolic expression permits distinct weights within one vector input.
     mpc.set_rterm(delta_u_cost)
 
-    mpc.bounds["lower", "_x", "x"] = ca.DM(cfg.state_lower)
-    mpc.bounds["upper", "_x", "x"] = ca.DM(cfg.state_upper)
+    state_lower = cfg.state_lower + ((-inf,) * 4 if cfg.uses_jerk_state else ())
+    state_upper = cfg.state_upper + ((inf,) * 4 if cfg.uses_jerk_state else ())
+    mpc.bounds["lower", "_x", "x"] = ca.DM(state_lower)
+    mpc.bounds["upper", "_x", "x"] = ca.DM(state_upper)
     mpc.bounds["lower", "_u", "u"] = ca.DM(cfg.input_lower)
     mpc.bounds["upper", "_u", "u"] = ca.DM(cfg.input_upper)
 

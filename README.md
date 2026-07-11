@@ -62,6 +62,20 @@ updates, the measured center is held as a do-mpc TVP and replicated across the
 assumption. The result folder contains an animation, rendered montage, safety
 plot, and full JSON trace.
 
+## Run trajectory-smoothness ablation
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python scripts/run_smoothness_ablation.py
+```
+
+This compares the waypoint baseline with a continuous B-spline reference at
+`Δu` weights 0.5, 1, 2, and 5, then evaluates an augmented-state `Δ²u` jerk
+penalty. It reports path length, curvature, acceleration RMS, jerk RMS/max,
+raw safety clearance, and solve time. Plot smoothing is explicitly marked as
+visualization-only; collision and clearance always use raw simulated poses.
+Ruckig is gated on the MPC-only result rather than installed unconditionally.
+
 ## Render the Build-L scene
 
 ```bash
