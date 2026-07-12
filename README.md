@@ -107,6 +107,21 @@ feedback response arrived too late for every episode. A paired rendered case
 still shows `gamma=0.02` avoiding a collision that the distance constraint does
 not. See [docs/HARD_SCENE_STUDY.md](docs/HARD_SCENE_STUDY.md).
 
+## Recreate the language-guided pick-and-place figure
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python scripts/run_language_guided_pick_place.py
+```
+
+This creates a four-cube camera scene, asks the Hugging Face optimization
+formulator for a validated gamma, moves the blue cube onto the red cube around
+a head-on spherical obstacle, and exports an annotated paper-style figure plus
+the full GIF and raw traces. The committed seed-7 run selected `gamma=0.02`,
+placed the cube with 13.23 mm error, and maintained 26.24 mm minimum raw
+clearance outside the CBF boundary. See
+[docs/LANGUAGE_GUIDED_PICK_PLACE.md](docs/LANGUAGE_GUIDED_PICK_PLACE.md).
+
 ## Render the Build-L scene
 
 ```bash

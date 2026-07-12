@@ -25,6 +25,18 @@ class BuildLDemoConfig:
     open_steps: int = 8
     settle_steps: int = 10
     render_stride: int = 5
+    cube_indices: tuple[int, ...] = (0, 1, 2, 3)
+    place_blue_on_red: bool = False
+    dynamic_obstacle: bool = False
+    obstacle_radius: float = 0.055
+    obstacle_velocity: tuple[float, float, float] = (0.0, 0.025, 0.0)
+    sensor_period: float = 0.67
+    measurement_noise_sigma: float = 0.005
+    user_instruction: str = "Build the four-cube L shape safely."
+    llm_model: str = "not-used"
+    llm_safety_level: int = 5
+    llm_latency_seconds: float = 0.0
+    llm_fallback_used: bool = False
     output_dir: str = "artifacts/build_l_mpc_cbf"
 
     def __post_init__(self) -> None:
@@ -40,8 +52,22 @@ class BuildLDemoConfig:
             self.waypoint_tolerance,
             self.cube_radius,
             self.gripper_collision_radius,
+            self.obstacle_radius,
+            self.sensor_period,
         ) <= 0.0:
             raise ValueError("geometric parameters must be positive")
+        if self.measurement_noise_sigma < 0.0:
+            raise ValueError("measurement noise must be non-negative")
+        if not self.cube_indices or any(index not in range(4) for index in self.cube_indices):
+            raise ValueError("cube_indices must contain values in [0, 3]")
+        if len(set(self.cube_indices)) != len(self.cube_indices):
+            raise ValueError("cube_indices must not contain duplicates")
+        if self.place_blue_on_red and self.cube_indices != (0,):
+            raise ValueError("blue-on-red mode requires cube_indices=(0,)")
+        if self.llm_safety_level not in range(1, 6):
+            raise ValueError("llm_safety_level must be in [1, 5]")
+        if self.llm_latency_seconds < 0.0 or not self.user_instruction.strip():
+            raise ValueError("language metadata must be valid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,10 +76,57 @@ class BuildLDemoResult:
     cubes_placed: int
     total_steps: int
     minimum_clearance: float
+    minimum_dynamic_clearance: float
     maximum_place_error: float
     mean_solve_time: float
     max_solve_time: float
     output_dir: str
+
+
+def _project_world_points(
+    points: Any,
+    *,
+    physics_client: Any,
+    width: int,
+    height: int,
+    target_position: Any,
+    distance: float,
+    yaw: float,
+    pitch: float,
+    roll: float,
+) -> Any:
+    """Project PyBullet world coordinates into rendered-image pixels."""
+
+    import numpy as np
+
+    xyz = np.asarray(points, dtype=float).reshape(-1, 3)
+    view = np.asarray(
+        physics_client.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=np.asarray(target_position, dtype=float),
+            distance=distance,
+            yaw=yaw,
+            pitch=pitch,
+            roll=roll,
+            upAxisIndex=2,
+        )
+    ).reshape(4, 4, order="F")
+    projection = np.asarray(
+        physics_client.computeProjectionMatrixFOV(
+            fov=60.0,
+            aspect=float(width) / height,
+            nearVal=0.1,
+            farVal=100.0,
+        )
+    ).reshape(4, 4, order="F")
+    homogeneous = np.column_stack([xyz, np.ones(len(xyz))])
+    clip = (projection @ view @ homogeneous.T).T
+    normalized = clip[:, :3] / clip[:, 3, None]
+    return np.column_stack(
+        [
+            (normalized[:, 0] + 1.0) * 0.5 * width,
+            (1.0 - normalized[:, 1]) * 0.5 * height,
+        ]
+    )
 
 
 def run_build_l_mpc_cbf_demo(
@@ -77,6 +150,7 @@ def run_build_l_mpc_cbf_demo(
 
     from .controller import PaperMPCConfig, build_mpc_controller
     from .demo import make_static_cbf_builder, paper_control_to_safe_panda_action
+    from .dynamic_obstacle_demo import OnlineObstacleCBF
 
     cfg = config or BuildLDemoConfig()
     np.random.seed(cfg.seed)
@@ -94,12 +168,25 @@ def run_build_l_mpc_cbf_demo(
     env = wrapped_env.unwrapped
 
     frames: list[Any] = []
+    frame_stages: list[str] = []
+    frame_obstacles: list[Any | None] = []
     end_effector_positions: list[Any] = []
+    trajectory_stages: list[str] = []
     clearances: list[float] = []
+    dynamic_clearances: list[float] = []
+    obstacle_positions: list[Any] = []
+    obstacle_measurements: list[Any] = []
+    sensor_update_steps: list[int] = []
     solve_times: list[float] = []
     stage_events: list[dict[str, Any]] = []
     total_steps = 0
     active_stage = "reset"
+    rng = np.random.default_rng(cfg.seed)
+    true_obstacle: Any | None = None
+    measured_obstacle: Any | None = None
+    next_sensor_time = cfg.sensor_period
+    obstacle_velocity = np.asarray(cfg.obstacle_velocity, dtype=float)
+    simulation_dt = PaperMPCConfig().dt
 
     def body_positions() -> list[Any]:
         return [
@@ -113,15 +200,45 @@ def run_build_l_mpc_cbf_demo(
             frame = env.render()
             if frame is not None:
                 frames.append(np.asarray(frame, dtype=np.uint8))
+                frame_stages.append(active_stage)
+                frame_obstacles.append(
+                    None if true_obstacle is None else true_obstacle.copy()
+                )
+
+    def advance_dynamic_obstacle() -> None:
+        nonlocal true_obstacle, measured_obstacle, next_sensor_time
+        if true_obstacle is None:
+            return
+        true_obstacle = true_obstacle + obstacle_velocity * simulation_dt
+        env.sim.set_base_pose(
+            "language_obstacle",
+            true_obstacle,
+            np.array([0.0, 0.0, 0.0, 1.0]),
+        )
+        elapsed = total_steps * simulation_dt
+        if elapsed + 1e-12 >= next_sensor_time:
+            measured_obstacle = true_obstacle + rng.normal(
+                0.0, cfg.measurement_noise_sigma, size=3
+            )
+            sensor_update_steps.append(total_steps)
+            next_sensor_time += cfg.sensor_period
 
     def record_step(obstacles: Sequence[Any]) -> None:
         position = np.asarray(env.robot.get_ee_position(), dtype=float)
         end_effector_positions.append(position)
+        trajectory_stages.append(active_stage)
         if obstacles:
             radius = cfg.cube_radius + cfg.gripper_collision_radius
             clearances.append(
                 min(float(np.linalg.norm(position - center) - radius) for center in obstacles)
             )
+        if true_obstacle is not None and measured_obstacle is not None:
+            combined_radius = cfg.obstacle_radius + cfg.gripper_collision_radius
+            dynamic_clearances.append(
+                float(np.linalg.norm(position - true_obstacle) - combined_radius)
+            )
+            obstacle_positions.append(true_obstacle.copy())
+            obstacle_measurements.append(measured_obstacle.copy())
         record_frame()
 
     def apply_gripper(command: float, steps: int, label: str) -> None:
@@ -131,6 +248,7 @@ def run_build_l_mpc_cbf_demo(
         for _ in range(steps):
             env.step(np.array([0.0, 0.0, 0.0, command], dtype=np.float32))
             total_steps += 1
+            advance_dynamic_obstacle()
             record_step(())
         stage_events.append(
             {"stage": label, "start_step": started_at, "end_step": total_steps, "reached": True}
@@ -142,6 +260,7 @@ def run_build_l_mpc_cbf_demo(
         gripper_command: float,
         label: str,
         tolerance: float | None = None,
+        dynamic_cbf: bool = True,
     ) -> bool:
         nonlocal total_steps, active_stage
         active_stage = label
@@ -152,9 +271,9 @@ def run_build_l_mpc_cbf_demo(
         mpc_config = PaperMPCConfig(
             target=(*target, 0.0, 0.0, 0.0, 0.0, 0.0)
         )
-        builders = ()
+        constraint_builders: tuple[Any, ...] = ()
         if obstacles:
-            builders = (
+            constraint_builders = (
                 make_static_cbf_builder(
                     obstacles,
                     obstacle_radius=cfg.cube_radius,
@@ -163,8 +282,27 @@ def run_build_l_mpc_cbf_demo(
                     dt=mpc_config.dt,
                 ),
             )
+        model_builders: tuple[Any, ...] = ()
+        online_cbf = None
+        if (
+            dynamic_cbf
+            and true_obstacle is not None
+            and measured_obstacle is not None
+        ):
+            online_cbf = OnlineObstacleCBF(
+                measured_obstacle,
+                obstacle_radius=cfg.obstacle_radius,
+                collision_radius=cfg.gripper_collision_radius,
+                gamma=cfg.gamma,
+                dt=mpc_config.dt,
+                horizon=mpc_config.horizon,
+            )
+            model_builders = (online_cbf.declare_tvp,)
+            constraint_builders += (online_cbf.add_constraint,)
         _, mpc = build_mpc_controller(
-            mpc_config, constraint_builders=builders
+            mpc_config,
+            model_builders=model_builders,
+            constraint_builders=constraint_builders,
         )
         mpc.x0 = initial_state.reshape(-1, 1)
         mpc.set_initial_guess()
@@ -177,6 +315,8 @@ def run_build_l_mpc_cbf_demo(
                 reached = True
                 break
             measured_state = np.concatenate([position, [0.0], previous_control])
+            if online_cbf is not None and measured_obstacle is not None:
+                online_cbf.update_measurement(measured_obstacle)
             started = perf_counter()
             candidate = np.asarray(
                 mpc.make_step(measured_state.reshape(-1, 1)), dtype=float
@@ -193,6 +333,7 @@ def run_build_l_mpc_cbf_demo(
             env.step(action)
             previous_control = candidate
             total_steps += 1
+            advance_dynamic_obstacle()
             record_step(obstacles)
         stage_events.append(
             {"stage": label, "start_step": started_at, "end_step": total_steps, "reached": reached}
@@ -232,11 +373,70 @@ def run_build_l_mpc_cbf_demo(
     try:
         observation, _ = env.reset(seed=cfg.seed)
         targets = np.asarray(observation["desired_goal"], dtype=float).reshape(4, 3)
+        if cfg.place_blue_on_red:
+            scene_objects = np.asarray(
+                [
+                    [-0.14, -0.12, 0.02],  # blue, manipulated
+                    [0.08, -0.08, 0.02],   # green distractor
+                    [0.08, 0.12, 0.02],    # orange distractor
+                    [-0.08, 0.14, 0.02],   # red placement base
+                ]
+            )
+            for index, position in enumerate(scene_objects, start=1):
+                env.sim.set_base_pose(
+                    f"object{index}",
+                    position,
+                    np.array([0.0, 0.0, 0.0, 1.0]),
+                )
+            env.sim.physics_client.changeVisualShape(
+                env.sim._bodies_idx["object3"],
+                -1,
+                rgbaColor=[0.95, 0.55, 0.05, 1.0],
+            )
+            hidden_target = np.array([2.0, 2.0, -1.0])
+            for index in range(2, 5):
+                env.sim.set_base_pose(
+                    f"target{index}",
+                    hidden_target,
+                    np.array([0.0, 0.0, 0.0, 1.0]),
+                )
         initial_objects = body_positions()
+        if cfg.place_blue_on_red:
+            targets = targets.copy()
+            targets[0] = initial_objects[3] + np.array([0.0, 0.0, 0.04])
+            env.sim.set_base_pose(
+                "target1",
+                targets[0],
+                np.array([0.0, 0.0, 0.0, 1.0]),
+            )
+        if cfg.dynamic_obstacle:
+            transport_start = initial_objects[0] + np.array(
+                [0.0, 0.0, cfg.hover_height]
+            )
+            transport_goal = targets[0] + np.array(
+                [0.0, 0.0, cfg.hover_height]
+            )
+            true_obstacle = 0.5 * (transport_start + transport_goal)
+            route_xy = transport_goal[:2] - transport_start[:2]
+            route_xy /= np.linalg.norm(route_xy)
+            true_obstacle[:2] += 0.025 * np.array([-route_xy[1], route_xy[0]])
+            measured_obstacle = true_obstacle + rng.normal(
+                0.0, cfg.measurement_noise_sigma, size=3
+            )
+            sensor_update_steps.append(0)
+            env.sim.create_sphere(
+                body_name="language_obstacle",
+                radius=cfg.obstacle_radius,
+                mass=0.0,
+                ghost=True,
+                position=true_obstacle,
+                rgba_color=np.array([0.95, 0.95, 0.95, 1.0]),
+                specular_color=np.array([0.5, 0.5, 0.5]),
+            )
         record_frame()
         all_stages_reached = True
 
-        for cube_index in range(4):
+        for cube_index in cfg.cube_indices:
             object_name = f"object{cube_index + 1}"
             objects = body_positions()
             object_position = objects[cube_index]
@@ -261,6 +461,29 @@ def run_build_l_mpc_cbf_demo(
             all_stages_reached &= move_to(
                 above_object, other_objects, -1.0, f"cube_{cube_index + 1}_lift"
             )
+            if true_obstacle is not None:
+                current_position = np.asarray(
+                    env.robot.get_ee_position(), dtype=float
+                )
+                route_xy = above_target[:2] - current_position[:2]
+                route_xy /= np.linalg.norm(route_xy)
+                left_normal = np.array([-route_xy[1], route_xy[0]])
+                waypoint = true_obstacle.copy()
+                waypoint[:2] += left_normal * (
+                    cfg.obstacle_radius
+                    + cfg.gripper_collision_radius
+                    + 0.07
+                )
+                waypoint[2] = max(
+                    current_position[2], above_target[2], true_obstacle[2]
+                )
+                all_stages_reached &= move_to(
+                    waypoint,
+                    other_objects,
+                    -1.0,
+                    f"cube_{cube_index + 1}_transport_avoid",
+                    tolerance=0.025,
+                )
             all_stages_reached &= move_to(
                 above_target, other_objects, -1.0, f"cube_{cube_index + 1}_transport"
             )
@@ -270,12 +493,14 @@ def run_build_l_mpc_cbf_demo(
                 -1.0,
                 f"cube_{cube_index + 1}_place",
                 tolerance=cfg.place_tolerance,
+                dynamic_cbf=False,
             )
             env.sim.physics_client.removeConstraint(constraint_id)
             apply_gripper(1.0, cfg.open_steps, f"cube_{cube_index + 1}_release")
             for _ in range(cfg.settle_steps):
                 env.step(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
                 total_steps += 1
+                advance_dynamic_obstacle()
                 record_step(())
             placement_error = float(
                 np.linalg.norm(
@@ -292,20 +517,31 @@ def run_build_l_mpc_cbf_demo(
                     break
             all_stages_reached &= placement_reached
             all_stages_reached &= move_to(
-                above_target, body_positions(), 1.0, f"cube_{cube_index + 1}_retreat"
+                above_target,
+                body_positions(),
+                1.0,
+                f"cube_{cube_index + 1}_retreat",
+                dynamic_cbf=False,
             )
 
         final_objects = np.asarray(body_positions())
         place_errors = np.linalg.norm(final_objects - targets, axis=1)
-        cubes_placed = int(np.sum(place_errors < 0.04))
-        success = bool(all_stages_reached and cubes_placed == 4)
+        selected_errors = place_errors[list(cfg.cube_indices)]
+        cubes_placed = int(np.sum(selected_errors < cfg.place_tolerance))
+        success = bool(
+            all_stages_reached and cubes_placed == len(cfg.cube_indices)
+        )
         minimum_clearance = float(min(clearances)) if clearances else float("nan")
+        minimum_dynamic_clearance = (
+            float(min(dynamic_clearances)) if dynamic_clearances else float("nan")
+        )
         result = BuildLDemoResult(
             success=success,
             cubes_placed=cubes_placed,
             total_steps=total_steps,
             minimum_clearance=minimum_clearance,
-            maximum_place_error=float(np.max(place_errors)),
+            minimum_dynamic_clearance=minimum_dynamic_clearance,
+            maximum_place_error=float(np.max(selected_errors)),
             mean_solve_time=float(np.mean(solve_times)),
             max_solve_time=float(np.max(solve_times)),
             output_dir=str(output_dir),
@@ -314,33 +550,217 @@ def run_build_l_mpc_cbf_demo(
         trajectory = np.asarray(end_effector_positions)
         fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
         axes[0].plot(trajectory[:, 0], trajectory[:, 1], color="blue", linewidth=1.2)
-        axes[0].scatter(initial_objects[0][0], initial_objects[0][1], alpha=0.0)
         axes[0].scatter(
             np.asarray(initial_objects)[:, 0],
             np.asarray(initial_objects)[:, 1],
-            c=["blue", "green", "green", "red"],
+            c=["blue", "green", "orange", "red"],
             marker="s",
             label="initial cubes",
         )
-        axes[0].scatter(targets[:, 0], targets[:, 1], c="orange", marker="x", label="L targets")
+        displayed_targets = (
+            targets[[0]] if cfg.place_blue_on_red else targets
+        )
+        axes[0].scatter(
+            displayed_targets[:, 0],
+            displayed_targets[:, 1],
+            c="red" if cfg.place_blue_on_red else "orange",
+            marker="x",
+            label="blue-on-red target" if cfg.place_blue_on_red else "L targets",
+        )
         axes[0].set_aspect("equal", adjustable="box")
         axes[0].set_title("End-effector MPC-CBF trajectory")
         axes[0].set_xlabel("x [m]")
         axes[0].set_ylabel("y [m]")
         axes[0].grid(True, alpha=0.3)
         axes[0].legend()
-        axes[1].bar(range(1, 5), place_errors)
+        displayed_indices = [index + 1 for index in cfg.cube_indices]
+        axes[1].bar(displayed_indices, selected_errors)
         axes[1].axhline(0.04, color="red", linestyle="--", label="placement tolerance")
-        axes[1].set_xticks(range(1, 5))
+        axes[1].set_xticks(displayed_indices)
         axes[1].set_xlabel("cube")
         axes[1].set_ylabel("final position error [m]")
-        axes[1].set_title("Build-L placement error")
+        axes[1].set_title(
+            "Blue-on-red placement error"
+            if cfg.place_blue_on_red
+            else "Build-L placement error"
+        )
         axes[1].grid(True, axis="y", alpha=0.3)
         axes[1].legend()
         fig.savefig(output_dir / "trajectory_and_placement.png", dpi=160)
         plt.close(fig)
 
         if frames:
+            if cfg.place_blue_on_red and cfg.dynamic_obstacle:
+                transport_frames = [
+                    index
+                    for index, stage in enumerate(frame_stages)
+                    if stage == "cube_1_transport"
+                ]
+                display_frame_index = (
+                    transport_frames[len(transport_frames) // 2]
+                    if transport_frames
+                    else len(frames) // 2
+                )
+                display_frame = frames[display_frame_index]
+                height, width = display_frame.shape[:2]
+                projection_options = {
+                    "physics_client": env.sim.physics_client,
+                    "width": width,
+                    "height": height,
+                    "target_position": env.render_target_position,
+                    "distance": env.render_distance,
+                    "yaw": env.render_yaw,
+                    "pitch": env.render_pitch,
+                    "roll": env.render_roll,
+                }
+                trajectory_pixels = _project_world_points(
+                    trajectory, **projection_options
+                )
+                approach_mask = np.asarray([
+                    stage in {"cube_1_approach", "cube_1_descend"}
+                    for stage in trajectory_stages
+                ])
+                transport_mask = np.asarray([
+                    stage in {
+                        "cube_1_lift",
+                        "cube_1_transport_avoid",
+                        "cube_1_transport",
+                        "cube_1_place",
+                    }
+                    for stage in trajectory_stages
+                ])
+                transport_world = trajectory[transport_mask]
+                transport_pixels = trajectory_pixels[transport_mask]
+                nominal_pixels = _project_world_points(
+                    np.asarray([transport_world[0], transport_world[-1]]),
+                    **projection_options,
+                )
+                displayed_obstacle = frame_obstacles[display_frame_index]
+                angles = np.linspace(0.0, 2.0 * np.pi, 180)
+                safety_radius = cfg.obstacle_radius + cfg.gripper_collision_radius
+                safety_circle = np.column_stack([
+                    displayed_obstacle[0] + safety_radius * np.cos(angles),
+                    displayed_obstacle[1] + safety_radius * np.sin(angles),
+                    np.full_like(angles, displayed_obstacle[2]),
+                ])
+                safety_pixels = _project_world_points(
+                    safety_circle, **projection_options
+                )
+                paper_fig = plt.figure(figsize=(13.5, 7.2), facecolor="white")
+                camera_axis = paper_fig.add_axes([0.02, 0.08, 0.70, 0.82])
+                camera_axis.imshow(display_frame)
+                camera_axis.plot(
+                    trajectory_pixels[approach_mask, 0],
+                    trajectory_pixels[approach_mask, 1],
+                    color="#f28e2b",
+                    linewidth=2.8,
+                    label="actual approach trajectory",
+                )
+                camera_axis.plot(
+                    nominal_pixels[:, 0],
+                    nominal_pixels[:, 1],
+                    color="#d62728",
+                    linestyle=":",
+                    linewidth=3.0,
+                    label="nominal straight transport",
+                )
+                camera_axis.plot(
+                    transport_pixels[:, 0],
+                    transport_pixels[:, 1],
+                    color="black",
+                    linewidth=3.2,
+                    label="executed MPC-CBF transport",
+                )
+                camera_axis.plot(
+                    safety_pixels[:, 0],
+                    safety_pixels[:, 1],
+                    color="#ffd400",
+                    linestyle="--",
+                    linewidth=3.0,
+                    label="CBF safety boundary h=0",
+                )
+                camera_axis.text(
+                    0.02,
+                    0.97,
+                    f"User → LLM: {cfg.user_instruction}",
+                    transform=camera_axis.transAxes,
+                    va="top",
+                    fontsize=11,
+                    fontweight="bold",
+                    bbox={
+                        "boxstyle": "round,pad=0.45",
+                        "facecolor": "#fff36d",
+                        "edgecolor": "#27364a",
+                        "alpha": 0.96,
+                    },
+                )
+                camera_axis.legend(
+                    loc="lower left", fontsize=8, framealpha=0.94
+                )
+                camera_axis.set_title(
+                    "Language-guided Safe Panda pick-and-place",
+                    fontsize=15,
+                    fontweight="bold",
+                )
+                camera_axis.axis("off")
+
+                box_style = {
+                    "boxstyle": "round,pad=0.55",
+                    "facecolor": "#f7fbff",
+                    "edgecolor": "#27364a",
+                    "linewidth": 1.4,
+                }
+                paper_fig.text(
+                    0.75,
+                    0.83,
+                    "LLM optimization formulator\n"
+                    f"model: {cfg.llm_model}\n"
+                    f"safety level: {cfg.llm_safety_level}/5\n"
+                    f"selected γ = {cfg.gamma:.2f}\n"
+                    f"latency: {cfg.llm_latency_seconds:.3f} s\n"
+                    f"fallback: {cfg.llm_fallback_used}",
+                    fontsize=10,
+                    va="top",
+                    bbox=box_style,
+                )
+                primitives = (
+                    "1. move_to(blue_cube, safely)\n\n"
+                    "2. close_gripper()\n\n"
+                    "3. move_above(red_cube, safely)\n\n"
+                    "4. open_gripper()"
+                )
+                paper_fig.text(
+                    0.75,
+                    0.55,
+                    primitives,
+                    fontsize=11,
+                    va="top",
+                    bbox=box_style,
+                )
+                paper_fig.text(
+                    0.75,
+                    0.27,
+                    "Measured result\n"
+                    f"goal success: {result.success}\n"
+                    f"minimum raw clearance: "
+                    f"{result.minimum_dynamic_clearance * 1000:.2f} mm\n"
+                    f"MPC mean solve time: {result.mean_solve_time * 1000:.2f} ms",
+                    fontsize=10,
+                    va="top",
+                    bbox=box_style,
+                )
+                paper_fig.text(
+                    0.02,
+                    0.015,
+                    "Orange/black are raw executed robot trajectories; red is the "
+                    "nominal direct route; yellow is the CBF set boundary, not a trajectory.",
+                    fontsize=9,
+                )
+                paper_fig.savefig(
+                    output_dir / "language_guided_mpc_cbf.png", dpi=180
+                )
+                plt.close(paper_fig)
+
             selected = [0, len(frames) // 2, len(frames) - 1]
             fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
             for axis, frame_index, title in zip(axes, selected, ("Start", "Middle", "Final")):
@@ -368,9 +788,25 @@ def run_build_l_mpc_cbf_demo(
             "place_errors": place_errors.tolist(),
             "stage_events": stage_events,
             "end_effector_positions": trajectory.tolist(),
+            "trajectory_stages": trajectory_stages,
             "clearances": clearances,
+            "dynamic_clearances": dynamic_clearances,
+            "obstacle_positions": [position.tolist() for position in obstacle_positions],
+            "obstacle_measurements": [
+                position.tolist() for position in obstacle_measurements
+            ],
+            "sensor_update_steps": sensor_update_steps,
             "solve_times": solve_times,
             "grasp_model": "fixed PyBullet constraint after gripper closure",
+            "trajectory_legend": {
+                "orange": "raw executed approach trajectory",
+                "red_dotted": "nominal straight transport reference",
+                "black": "raw executed MPC-CBF transport trajectory",
+                "yellow_dashed": "CBF safety boundary h=0 (not a trajectory)",
+            },
+            "language_control_boundary": (
+                "LLM selects task primitives and gamma; MPC-CBF computes trajectory"
+            ),
         }
         (output_dir / "metrics.json").write_text(
             json.dumps(metrics, indent=2), encoding="utf-8"
