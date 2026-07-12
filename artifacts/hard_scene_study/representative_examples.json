@@ -1,0 +1,46 @@
+{
+  "distance_collision": {
+    "reached_goal": false,
+    "collision": true,
+    "steps": 22,
+    "sensor_updates": 2,
+    "minimum_true_clearance": -0.002900796780862802,
+    "minimum_measured_clearance": 0.0011182993706505273,
+    "final_goal_distance": 0.052838331900279596,
+    "mean_solve_time": 0.006642663131721995,
+    "max_solve_time": 0.013939878903329372,
+    "final_gamma": 0.15,
+    "gamma_updates_applied": 0,
+    "smoothness": {
+      "path_length": 0.2821694407018143,
+      "mean_curvature": 16.821638936384304,
+      "max_curvature": 176.96307017259588,
+      "acceleration_rms": 1.7910170683615325,
+      "jerk_rms": 34.41236078421151,
+      "jerk_max": 112.13577971614374
+    },
+    "output_dir": "artifacts/hard_scene_study/distance_collision"
+  },
+  "cbf_gamma_002_avoidance": {
+    "reached_goal": true,
+    "collision": false,
+    "steps": 72,
+    "sensor_updates": 5,
+    "minimum_true_clearance": 0.004451061801347633,
+    "minimum_measured_clearance": 0.007755509495717211,
+    "final_goal_distance": 0.049628386547579666,
+    "mean_solve_time": 0.009310116448129216,
+    "max_solve_time": 0.014887201017700136,
+    "final_gamma": 0.02,
+    "gamma_updates_applied": 0,
+    "smoothness": {
+      "path_length": 0.4331650944294925,
+      "mean_curvature": 419.50415634367045,
+      "max_curvature": 14878.6581598058,
+      "acceleration_rms": 0.954941665156015,
+      "jerk_rms": 18.370489454448457,
+      "jerk_max": 52.783862364009586
+    },
+    "output_dir": "artifacts/hard_scene_study/cbf_gamma_002_avoidance"
+  }
+}

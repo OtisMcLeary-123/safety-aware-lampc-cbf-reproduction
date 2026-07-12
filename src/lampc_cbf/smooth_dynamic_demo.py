@@ -29,6 +29,11 @@ class SmoothDynamicConfig:
     obstacle_radius: float = 0.10
     collision_radius: float = 0.035
     route_margin: float = 0.08
+    reference_mode: str = "behind_spline"
+    safety_mode: str = "cbf"
+    gamma_schedule: tuple[tuple[float, float], ...] = ()
+    save_plots: bool = True
+    save_metrics: bool = True
     output_dir: str = "artifacts/smoothness_ablation/spline_du_0.5"
 
     def __post_init__(self) -> None:
@@ -42,6 +47,17 @@ class SmoothDynamicConfig:
             raise ValueError("period and reference speed must be positive")
         if self.measurement_noise_sigma < 0.0:
             raise ValueError("measurement noise must be non-negative")
+        if self.reference_mode not in {"behind_spline", "straight"}:
+            raise ValueError("reference_mode must be behind_spline or straight")
+        if self.safety_mode not in {"cbf", "distance", "none"}:
+            raise ValueError("safety_mode must be cbf, distance, or none")
+        previous_time = -1.0
+        for update_time, gamma in self.gamma_schedule:
+            if update_time < 0.0 or update_time < previous_time:
+                raise ValueError("gamma_schedule times must be non-negative and sorted")
+            if not 0.0 < gamma <= 0.15:
+                raise ValueError("scheduled gamma must be in (0, 0.15]")
+            previous_time = update_time
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +71,8 @@ class SmoothDynamicResult:
     final_goal_distance: float
     mean_solve_time: float
     max_solve_time: float
+    final_gamma: float
+    gamma_updates_applied: int
     smoothness: SmoothnessMetrics
     output_dir: str
 
@@ -73,6 +91,7 @@ class ReferenceObstacleTVP:
         gamma: float,
         dt: float,
         horizon: int,
+        safety_mode: str = "cbf",
     ) -> None:
         import numpy as np
 
@@ -87,6 +106,9 @@ class ReferenceObstacleTVP:
         self.gamma = gamma
         self.dt = dt
         self.horizon = horizon
+        if safety_mode not in {"cbf", "distance", "none"}:
+            raise ValueError("invalid safety_mode")
+        self.safety_mode = safety_mode
         segment_lengths = np.linalg.norm(
             np.diff(self.reference_path, axis=0), axis=1
         )
@@ -94,6 +116,7 @@ class ReferenceObstacleTVP:
         self.progress_index = 0
         self._obstacle_tvp = None
         self._reference_tvp = None
+        self._gamma_tvp = None
 
     def update_gamma(self, gamma: float) -> None:
         """Hot-swap an LLM-selected safety parameter without rebuilding MPC."""
@@ -127,12 +150,17 @@ class ReferenceObstacleTVP:
         self._reference_tvp = model.set_variable(
             "_tvp", "reference_state", shape=(8, 1)
         )
+        self._gamma_tvp = model.set_variable("_tvp", "cbf_gamma", shape=(1, 1))
 
     def configure(self, model: Any, mpc: Any, x: Any, u: Any, ca: Any) -> None:
         import numpy as np
 
         del model, u
-        if self._obstacle_tvp is None or self._reference_tvp is None:
+        if (
+            self._obstacle_tvp is None
+            or self._reference_tvp is None
+            or self._gamma_tvp is None
+        ):
             raise RuntimeError("declare must run before configure")
         position = x[:3]
         next_position = position + self.dt * x[4:7]
@@ -142,11 +170,14 @@ class ReferenceObstacleTVP:
         h_next = (
             ca.sumsqr(next_position - self._obstacle_tvp) - self.combined_radius**2
         )
-        mpc.set_nl_cons(
-            "dynamic_obstacle_cbf",
-            (1.0 - self.gamma) * h_current - h_next,
-            ub=0.0,
-        )
+        if self.safety_mode == "cbf":
+            mpc.set_nl_cons(
+                "dynamic_obstacle_cbf",
+                (1.0 - self._gamma_tvp) * h_current - h_next,
+                ub=0.0,
+            )
+        elif self.safety_mode == "distance":
+            mpc.set_nl_cons("dynamic_obstacle_distance", -h_next, ub=0.0)
         template = mpc.get_tvp_template()
 
         def tvp_fun(t_now: float) -> Any:
@@ -181,6 +212,7 @@ class ReferenceObstacleTVP:
                 template["_tvp", stage, "reference_state"] = (
                     reference_state.reshape(8, 1)
                 )
+                template["_tvp", stage, "cbf_gamma"] = self.gamma
             return template
 
         mpc.set_tvp_fun(tvp_fun)
@@ -244,17 +276,21 @@ def run_smooth_dynamic_demo(
         observation = env._get_obs()
 
         combined_radius = cfg.obstacle_radius + cfg.collision_radius
-        route_offset = combined_radius + cfg.route_margin
-        route_direction = -1.0 if obstacle_velocity[0] >= 0.0 else 1.0
-        route_points = np.asarray(
-            [
-                start,
-                start + np.array([route_direction * route_offset, 0.075, 0.0]),
-                start + np.array([route_direction * route_offset, 0.225, 0.0]),
-                goal,
-            ]
-        )
-        reference_path = make_reference_bspline(route_points)
+        if cfg.reference_mode == "straight":
+            route_points = np.asarray([start, goal])
+            reference_path = np.linspace(start, goal, 600)
+        else:
+            route_offset = combined_radius + cfg.route_margin
+            route_direction = -1.0 if obstacle_velocity[0] >= 0.0 else 1.0
+            route_points = np.asarray(
+                [
+                    start,
+                    start + np.array([route_direction * route_offset, 0.075, 0.0]),
+                    start + np.array([route_direction * route_offset, 0.225, 0.0]),
+                    goal,
+                ]
+            )
+            reference_path = make_reference_bspline(route_points)
         measurement = true_obstacle + rng.normal(
             0.0, cfg.measurement_noise_sigma, size=3
         )
@@ -272,6 +308,7 @@ def run_smooth_dynamic_demo(
             gamma=cfg.gamma,
             dt=mpc_config.dt,
             horizon=mpc_config.horizon,
+            safety_mode=cfg.safety_mode,
         )
         _, mpc = build_mpc_controller(
             mpc_config,
@@ -288,9 +325,26 @@ def run_smooth_dynamic_demo(
         reached_goal = False
         collision = False
         next_sensor_time = cfg.sensor_period
+        schedule_index = 0
+        applied_gamma_updates: list[dict[str, float]] = []
+        gamma_trace: list[float] = []
 
         for step_index in range(cfg.max_steps):
             elapsed = step_index * mpc_config.dt
+            while (
+                schedule_index < len(cfg.gamma_schedule)
+                and elapsed + 1e-12 >= cfg.gamma_schedule[schedule_index][0]
+            ):
+                scheduled_time, scheduled_gamma = cfg.gamma_schedule[schedule_index]
+                tvp.update_gamma(scheduled_gamma)
+                applied_gamma_updates.append(
+                    {
+                        "scheduled_time": scheduled_time,
+                        "applied_time": elapsed,
+                        "gamma": scheduled_gamma,
+                    }
+                )
+                schedule_index += 1
             if elapsed + 1e-12 >= next_sensor_time:
                 measurement = true_obstacle + rng.normal(
                     0.0, cfg.measurement_noise_sigma, size=3
@@ -336,6 +390,7 @@ def run_smooth_dynamic_demo(
             true_clearances.append(true_clearance)
             measured_clearances.append(measured_clearance)
             goal_distances.append(goal_distance)
+            gamma_trace.append(tvp.gamma)
             if cfg.save_animation and step_index % cfg.render_stride == 0:
                 frame = env.render()
                 if frame is not None:
@@ -352,42 +407,47 @@ def run_smooth_dynamic_demo(
         measured_array = np.asarray(measured_obstacles)
         controls_array = np.asarray(controls)
         smoothness = calculate_smoothness_metrics(raw_positions, mpc_config.dt)
-        visual_spline = make_visual_smoothing_spline(raw_positions)
+        visual_spline = (
+            make_visual_smoothing_spline(raw_positions)
+            if cfg.save_plots
+            else np.empty((0, 3))
+        )
         time = np.arange(1, len(raw_positions) + 1) * mpc_config.dt
 
-        fig, axes = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
-        axes[0].plot(
-            raw_positions[:, 0], raw_positions[:, 1], color="steelblue",
-            alpha=0.4, linewidth=1.0, label="raw trajectory (safety truth)",
-        )
-        axes[0].plot(
-            visual_spline[:, 0], visual_spline[:, 1], color="navy",
-            linewidth=2.0, label="visual smoothing spline",
-        )
-        axes[0].plot(
-            reference_path[:, 0], reference_path[:, 1], "--", color="green",
-            linewidth=1.2, label="continuous B-spline reference",
-        )
-        axes[0].plot(true_array[:, 0], true_array[:, 1], "r--", label="obstacle")
-        axes[0].scatter(start[0], start[1], c="black", label="start")
-        axes[0].scatter(goal[0], goal[1], c="green", marker="*", s=140, label="goal")
-        axes[0].set_aspect("equal", adjustable="box")
-        axes[0].set_xlabel("x [m]")
-        axes[0].set_ylabel("y [m]")
-        axes[0].set_title("Raw, visual spline, and MPC reference")
-        axes[0].grid(True, alpha=0.3)
-        axes[0].legend(fontsize=7)
+        if cfg.save_plots:
+            fig, axes = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
+            axes[0].plot(
+                raw_positions[:, 0], raw_positions[:, 1], color="steelblue",
+                alpha=0.4, linewidth=1.0, label="raw trajectory (safety truth)",
+            )
+            axes[0].plot(
+                visual_spline[:, 0], visual_spline[:, 1], color="navy",
+                linewidth=2.0, label="visual smoothing spline",
+            )
+            axes[0].plot(
+                reference_path[:, 0], reference_path[:, 1], "--", color="green",
+                linewidth=1.2, label="continuous B-spline reference",
+            )
+            axes[0].plot(true_array[:, 0], true_array[:, 1], "r--", label="obstacle")
+            axes[0].scatter(start[0], start[1], c="black", label="start")
+            axes[0].scatter(goal[0], goal[1], c="green", marker="*", s=140, label="goal")
+            axes[0].set_aspect("equal", adjustable="box")
+            axes[0].set_xlabel("x [m]")
+            axes[0].set_ylabel("y [m]")
+            axes[0].set_title("Raw, visual spline, and MPC reference")
+            axes[0].grid(True, alpha=0.3)
+            axes[0].legend(fontsize=7)
 
-        axes[1].plot(time, true_clearances, label="raw true clearance")
-        axes[1].plot(time, measured_clearances, label="raw measured clearance")
-        axes[1].axhline(0.0, color="red", linestyle="--", label="collision boundary")
-        axes[1].set_xlabel("time [s]")
-        axes[1].set_ylabel("clearance [m]")
-        axes[1].set_title("Safety metrics use raw trajectory only")
-        axes[1].grid(True, alpha=0.3)
-        axes[1].legend(fontsize=8)
-        fig.savefig(output_dir / "raw_smoothed_and_safety.png", dpi=160)
-        plt.close(fig)
+            axes[1].plot(time, true_clearances, label="raw true clearance")
+            axes[1].plot(time, measured_clearances, label="raw measured clearance")
+            axes[1].axhline(0.0, color="red", linestyle="--", label="collision boundary")
+            axes[1].set_xlabel("time [s]")
+            axes[1].set_ylabel("clearance [m]")
+            axes[1].set_title("Safety metrics use raw trajectory only")
+            axes[1].grid(True, alpha=0.3)
+            axes[1].legend(fontsize=8)
+            fig.savefig(output_dir / "raw_smoothed_and_safety.png", dpi=160)
+            plt.close(fig)
 
         if frames:
             gif_frames = [Image.fromarray(frame) for frame in frames]
@@ -406,6 +466,8 @@ def run_smooth_dynamic_demo(
             final_goal_distance=float(goal_distances[-1]),
             mean_solve_time=float(np.mean(solve_times)),
             max_solve_time=float(np.max(solve_times)),
+            final_gamma=tvp.gamma,
+            gamma_updates_applied=len(applied_gamma_updates),
             smoothness=smoothness,
             output_dir=str(output_dir),
         )
@@ -418,6 +480,8 @@ def run_smooth_dynamic_demo(
             "route_points": route_points.tolist(),
             "reference_path": reference_path.tolist(),
             "sensor_update_steps": sensor_update_steps,
+            "applied_gamma_updates": applied_gamma_updates,
+            "gamma_trace": gamma_trace,
             "positions": raw_positions.tolist(),
             "visual_spline": visual_spline.tolist(),
             "true_obstacles": true_array.tolist(),
@@ -428,9 +492,10 @@ def run_smooth_dynamic_demo(
             "goal_distances": goal_distances,
             "solve_times": solve_times,
         }
-        (output_dir / "metrics.json").write_text(
-            json.dumps(payload, indent=2), encoding="utf-8"
-        )
+        if cfg.save_metrics:
+            (output_dir / "metrics.json").write_text(
+                json.dumps(payload, indent=2), encoding="utf-8"
+            )
         return result
     finally:
         wrapped_env.close()

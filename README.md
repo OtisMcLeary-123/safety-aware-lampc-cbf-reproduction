@@ -90,6 +90,23 @@ levels locally, and fails closed to `gamma=0.05`. The token remains in the
 ignored `hftoken.txt` file and the LLM is never called inside the 40 ms control
 loop. See [docs/HF_LLM_INTEGRATION.md](docs/HF_LLM_INTEGRATION.md).
 
+## Run the paper-style hard scene
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python scripts/run_hard_scene_study.py
+PYTHONPATH=src python scripts/render_hard_scene_examples.py
+```
+
+This removes the hand-designed avoidance waypoint, sends a randomized obstacle
+head-on toward a straight reference, and runs 50 paired episodes for a distance
+constraint, fixed CBF, LLM-selected initial gamma, and measured-latency online
+feedback. The committed run is a negative aggregate result: 34% success for
+the distance baseline versus 32% for each CBF/LLM condition, while the 1.612 s
+feedback response arrived too late for every episode. A paired rendered case
+still shows `gamma=0.02` avoiding a collision that the distance constraint does
+not. See [docs/HARD_SCENE_STUDY.md](docs/HARD_SCENE_STUDY.md).
+
 ## Render the Build-L scene
 
 ```bash
