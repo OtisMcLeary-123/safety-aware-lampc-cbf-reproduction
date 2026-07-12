@@ -1,0 +1,45 @@
+{
+  "instruction": "Keep a generous distance from the moving obstacle and be cautious.",
+  "llm_decision": {
+    "gamma": 0.05,
+    "safety_level": 2,
+    "explanation": "LLM mapped instruction to calibrated safety level 2.",
+    "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "provider": "deepinfra",
+    "latency_seconds": 1.9946185359731317,
+    "requested_at_unix": 1783822471.280068,
+    "prompt_hash": "7f6b0432f6e0ab41737c7b196260b44d666d9dbb2e36f2da09d1d75f97d9171f",
+    "request_hash": "d54ae28dc9eb87d227fc1cdb937dfe3636d8da3168e9ef0726c7e62ec49c8da5",
+    "raw_response": "{\"gamma_text\":  \"0.05\", \"safety_level\": 2}",
+    "fallback_used": false,
+    "cache_hit": false,
+    "error_type": null
+  },
+  "controller_gamma": 0.05,
+  "fallback_policy": {
+    "gamma": 0.05,
+    "LLM_inside_40ms_control_loop": false,
+    "invalid_or_timeout_output_bypasses_CBF": false
+  },
+  "simulation_result": {
+    "reached_goal": true,
+    "collision": false,
+    "steps": 39,
+    "sensor_updates": 3,
+    "minimum_true_clearance": 0.03774144050697409,
+    "minimum_measured_clearance": 0.012392552266795392,
+    "final_goal_distance": 0.0360384898040363,
+    "mean_solve_time": 0.007581969158938871,
+    "max_solve_time": 0.011651771957986057,
+    "smoothness": {
+      "path_length": 0.7307565231633106,
+      "mean_curvature": 5.525784953846202,
+      "max_curvature": 6.980183536012944,
+      "acceleration_rms": 1.404512646738581,
+      "jerk_rms": 5.965069737075994,
+      "jerk_max": 12.729578078597578
+    },
+    "output_dir": "artifacts/hf_llm_control_demo/simulation"
+  },
+  "token_recorded": false
+}

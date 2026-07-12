@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+llm = ["huggingface_hub>=0.34,<2"]
 simulation = [
     "casadi==3.7.2",
     "do-mpc==5.1.1",

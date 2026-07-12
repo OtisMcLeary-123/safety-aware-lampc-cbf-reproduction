@@ -28,3 +28,20 @@ def test_reference_progress_is_monotone() -> None:
 
     assert forward_index > 0
     assert provider.progress_index == forward_index
+
+
+def test_reference_provider_hot_swaps_valid_gamma() -> None:
+    path = np.column_stack(
+        [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]
+    )
+    provider = ReferenceObstacleTVP(
+        path, (0.0, 2.0, 1.0), reference_speed=0.1,
+        obstacle_radius=0.1, collision_radius=0.035,
+        gamma=0.1, dt=0.04, horizon=15,
+    )
+
+    provider.update_gamma(0.03)
+
+    assert provider.gamma == pytest.approx(0.03)
+    with pytest.raises(ValueError, match="experimental interval"):
+        provider.update_gamma(0.2)

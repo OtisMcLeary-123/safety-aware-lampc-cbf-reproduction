@@ -76,6 +76,20 @@ raw safety clearance, and solve time. Plot smoothing is explicitly marked as
 visualization-only; collision and clearance always use raw simulated poses.
 Ruckig is gated on the MPC-only result rather than installed unconditionally.
 
+## Configure MPC-CBF from language with Hugging Face
+
+```bash
+source .venv/bin/activate
+python -m pip install -e '.[llm,simulation]'
+PYTHONPATH=src python scripts/run_hf_configured_mpc_cbf.py
+```
+
+The default mapper uses structured output from
+`Qwen/Qwen3-235B-A22B-Instruct-2507`, validates one of five experimental gamma
+levels locally, and fails closed to `gamma=0.05`. The token remains in the
+ignored `hftoken.txt` file and the LLM is never called inside the 40 ms control
+loop. See [docs/HF_LLM_INTEGRATION.md](docs/HF_LLM_INTEGRATION.md).
+
 ## Render the Build-L scene
 
 ```bash

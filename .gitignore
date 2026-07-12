@@ -9,5 +9,5 @@ build/
 dist/
 *.egg-info/
 .env
+hftoken.txt
 results/
-

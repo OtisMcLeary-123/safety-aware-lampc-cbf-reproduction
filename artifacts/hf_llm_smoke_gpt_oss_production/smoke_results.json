@@ -1,0 +1,102 @@
+{
+  "model": "openai/gpt-oss-120b",
+  "provider": "deepinfra",
+  "cases": [
+    {
+      "instruction": "Keep as far away from the obstacle as possible; be maximally cautious.",
+      "decision": {
+        "gamma": 0.05,
+        "safety_level": 2,
+        "explanation": "Bounded safety fallback after unavailable or invalid LLM output.",
+        "model": "openai/gpt-oss-120b",
+        "provider": "deepinfra",
+        "latency_seconds": 0.5756109410431236,
+        "requested_at_unix": 1783822383.2918143,
+        "prompt_hash": "7f6b0432f6e0ab41737c7b196260b44d666d9dbb2e36f2da09d1d75f97d9171f",
+        "request_hash": "f2a3dab6ec716c650bc54545a9516fcd0862defac3ea4377b8982523ec4f3481",
+        "raw_response": null,
+        "fallback_used": true,
+        "cache_hit": false,
+        "error_type": "HfHubHTTPError"
+      }
+    },
+    {
+      "instruction": "Be careful and maintain a generous safety distance.",
+      "decision": {
+        "gamma": 0.05,
+        "safety_level": 2,
+        "explanation": "Bounded safety fallback after unavailable or invalid LLM output.",
+        "model": "openai/gpt-oss-120b",
+        "provider": "deepinfra",
+        "latency_seconds": 0.21081264805980027,
+        "requested_at_unix": 1783822385.8676043,
+        "prompt_hash": "7f6b0432f6e0ab41737c7b196260b44d666d9dbb2e36f2da09d1d75f97d9171f",
+        "request_hash": "fc1a0c0d009389c93f1daeb434213dd505bcd51d2b6f111acabdf57269aef007",
+        "raw_response": null,
+        "fallback_used": true,
+        "cache_hit": false,
+        "error_type": "HfHubHTTPError"
+      }
+    },
+    {
+      "instruction": "Use a normal balance between completing the task and obstacle clearance.",
+      "decision": {
+        "gamma": 0.05,
+        "safety_level": 2,
+        "explanation": "Bounded safety fallback after unavailable or invalid LLM output.",
+        "model": "openai/gpt-oss-120b",
+        "provider": "deepinfra",
+        "latency_seconds": 1.2752607639413327,
+        "requested_at_unix": 1783822388.078629,
+        "prompt_hash": "7f6b0432f6e0ab41737c7b196260b44d666d9dbb2e36f2da09d1d75f97d9171f",
+        "request_hash": "8f4ac9c0b017f197a1ab031557d7653f19c7146e2a01cf2b4532b90fd5fa906b",
+        "raw_response": "",
+        "fallback_used": true,
+        "cache_hit": false,
+        "error_type": "JSONDecodeError"
+      }
+    },
+    {
+      "instruction": "Move efficiently; a modest safety margin is enough.",
+      "decision": {
+        "gamma": 0.05,
+        "safety_level": 2,
+        "explanation": "Bounded safety fallback after unavailable or invalid LLM output.",
+        "model": "openai/gpt-oss-120b",
+        "provider": "deepinfra",
+        "latency_seconds": 1.0903416629880667,
+        "requested_at_unix": 1783822391.3541956,
+        "prompt_hash": "7f6b0432f6e0ab41737c7b196260b44d666d9dbb2e36f2da09d1d75f97d9171f",
+        "request_hash": "5cc99ebd2381f3f84c667b52c62ea8280d3ffae44499c7e8d8371a2aaac239a1",
+        "raw_response": "",
+        "fallback_used": true,
+        "cache_hit": false,
+        "error_type": "JSONDecodeError"
+      }
+    },
+    {
+      "instruction": "Prioritize speed and use only the minimum required obstacle margin.",
+      "decision": {
+        "gamma": 0.05,
+        "safety_level": 2,
+        "explanation": "Bounded safety fallback after unavailable or invalid LLM output.",
+        "model": "openai/gpt-oss-120b",
+        "provider": "deepinfra",
+        "latency_seconds": 1.3685463370056823,
+        "requested_at_unix": 1783822394.4446797,
+        "prompt_hash": "7f6b0432f6e0ab41737c7b196260b44d666d9dbb2e36f2da09d1d75f97d9171f",
+        "request_hash": "49fd8b3d7c361d6c6b9761143fa455f5915f871617536d8571e8b34c850bcd27",
+        "raw_response": "",
+        "fallback_used": true,
+        "cache_hit": false,
+        "error_type": "JSONDecodeError"
+      }
+    }
+  ],
+  "schema_success_rate": 0,
+  "mean_latency_seconds": 0.9041144706076011,
+  "max_latency_seconds": 1.3685463370056823,
+  "gamma_monotone_with_less_cautious_language": true,
+  "level_monotone_with_less_cautious_language": true,
+  "token_recorded": false
+}

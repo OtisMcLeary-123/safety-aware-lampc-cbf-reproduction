@@ -95,6 +95,13 @@ class ReferenceObstacleTVP:
         self._obstacle_tvp = None
         self._reference_tvp = None
 
+    def update_gamma(self, gamma: float) -> None:
+        """Hot-swap an LLM-selected safety parameter without rebuilding MPC."""
+
+        if not 0.0 < gamma <= 0.15:
+            raise ValueError("gamma must be in the experimental interval (0, 0.15]")
+        self.gamma = float(gamma)
+
     def update(
         self, robot_position: Sequence[float], obstacle_measurement: Sequence[float]
     ) -> None:
