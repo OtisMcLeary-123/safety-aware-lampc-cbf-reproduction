@@ -37,6 +37,15 @@ def test_discrete_cbf_value_matches_rearranged_paper_constraint() -> None:
     assert symbolic.discrete_cbf_value(10, 7, 0.2) == pytest.approx(-1.0)
 
 
+def test_optimal_decay_relaxes_contraction_but_preserves_positive_boundary() -> None:
+    assert symbolic.optimal_decay_cbf_value(10, 4, 0.2, 0.5) == pytest.approx(0.0)
+    assert symbolic.optimal_decay_cbf_value(10, 3, 0.2, 0.5) < 0.0
+    with pytest.raises(ValueError, match="0 < decay <= 1"):
+        symbolic.optimal_decay_cbf_value(10, 8, 0.2, 0.0)
+    with pytest.raises(ValueError, match="0 < decay <= 1"):
+        symbolic.optimal_decay_cbf_value(10, 8, 0.2, 1.1)
+
+
 @pytest.mark.parametrize("gamma", [0, -0.1, 1.01])
 def test_discrete_cbf_value_enforces_paper_gamma_domain(gamma: float) -> None:
     with pytest.raises(ValueError, match="0 < gamma <= 1"):

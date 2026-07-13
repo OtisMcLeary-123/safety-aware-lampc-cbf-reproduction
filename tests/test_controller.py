@@ -22,6 +22,7 @@ def test_paper_dimensions_and_default_parameters() -> None:
     assert config.dt == pytest.approx(0.04)
     assert config.horizon == 15
     assert not config.uses_jerk_state
+    assert not config.uses_optimal_decay
     assert config.delta_u_weights == pytest.approx((0.5, 0.5, 0.5, 1e-5))
     assert config.input_lower == pytest.approx((-0.2, -0.2, -0.2, -math.pi))
     assert config.input_upper == pytest.approx((0.2, 0.2, 0.2, math.pi))
@@ -53,6 +54,8 @@ def test_paper_dynamics_update_pose_and_replace_displacement() -> None:
         ({"horizon": 0}, "horizon must be at least one"),
         ({"target": (0.0,) * 7}, "exactly 8"),
         ({"velocity_regularization": -1.0}, "non-negative"),
+        ({"optimal_decay_lower": 0.0}, "optimal decay bounds"),
+        ({"optimal_decay_upper": 1.1}, "optimal decay bounds"),
     ],
 )
 def test_invalid_configuration_is_rejected(
@@ -118,3 +121,19 @@ def test_controller_builds_augmented_jerk_state() -> None:
     model, _ = build_mpc_controller(PaperMPCConfig(linear_jerk_weight=0.1))
 
     assert model.x["x"].shape == (12, 1)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("do_mpc") is None
+    or importlib.util.find_spec("casadi") is None,
+    reason="do-mpc/CasADi control extras are not installed",
+)
+def test_controller_builds_bounded_optimal_decay_input() -> None:
+    model, mpc = build_mpc_controller(
+        PaperMPCConfig(optimal_decay_weight=10.0, optimal_decay_lower=0.2)
+    )
+
+    assert model.u["u"].shape == (4, 1)
+    assert model.u["cbf_decay"].shape == (1, 1)
+    assert float(mpc.bounds["lower", "_u", "cbf_decay"]) == pytest.approx(0.2)
+    assert float(mpc.bounds["upper", "_u", "cbf_decay"]) == pytest.approx(1.0)

@@ -36,6 +36,10 @@ class PaperMPCConfig:
     yaw_delta_u_weight: float = 1e-5
     linear_jerk_weight: float = 0.0
     yaw_jerk_weight: float = 0.0
+    optimal_decay_weight: float = 0.0
+    optimal_decay_nominal: float = 1.0
+    optimal_decay_lower: float = 0.1
+    optimal_decay_upper: float = 1.0
     target_tvp_name: str | None = None
     velocity_regularization: float = 0.1
     yaw_regularization: float = 5e-5
@@ -60,6 +64,7 @@ class PaperMPCConfig:
             self.yaw_delta_u_weight,
             self.linear_jerk_weight,
             self.yaw_jerk_weight,
+            self.optimal_decay_weight,
             self.velocity_regularization,
             self.yaw_regularization,
         )
@@ -69,10 +74,18 @@ class PaperMPCConfig:
             raise ValueError("input limits must be positive")
         if self.target_tvp_name == "":
             raise ValueError("target_tvp_name must be non-empty when provided")
+        if not 0.0 < self.optimal_decay_lower <= self.optimal_decay_nominal <= self.optimal_decay_upper <= 1.0:
+            raise ValueError(
+                "optimal decay bounds must satisfy 0 < lower <= nominal <= upper <= 1"
+            )
 
     @property
     def uses_jerk_state(self) -> bool:
         return self.linear_jerk_weight > 0.0 or self.yaw_jerk_weight > 0.0
+
+    @property
+    def uses_optimal_decay(self) -> bool:
+        return self.optimal_decay_weight > 0.0
 
     @property
     def state_lower(self) -> tuple[float, ...]:
@@ -175,6 +188,11 @@ def build_mpc_controller(
         var_type="_x", var_name="x", shape=(state_dimension, 1)
     )
     u = model.set_variable(var_type="_u", var_name="u", shape=(4, 1))
+    decay = (
+        model.set_variable(var_type="_u", var_name="cbf_decay", shape=(1, 1))
+        if cfg.uses_optimal_decay
+        else None
+    )
     a_values, b_values = paper_dynamics_matrices(cfg.dt)
     a = ca.DM(a_values)
     b = ca.DM(b_values)
@@ -223,6 +241,10 @@ def build_mpc_controller(
             cfg.linear_jerk_weight * ca.dot(jerk[:3], jerk[:3])
             + cfg.yaw_jerk_weight * jerk[3] ** 2
         )
+    if decay is not None:
+        stage_cost += cfg.optimal_decay_weight * (
+            decay - cfg.optimal_decay_nominal
+        ) ** 2
     mpc.set_objective(mterm=terminal_cost, lterm=stage_cost)
     delta_u = u - mpc.u_prev["u"]
     delta_u_cost = (
@@ -238,6 +260,9 @@ def build_mpc_controller(
     mpc.bounds["upper", "_x", "x"] = ca.DM(state_upper)
     mpc.bounds["lower", "_u", "u"] = ca.DM(cfg.input_lower)
     mpc.bounds["upper", "_u", "u"] = ca.DM(cfg.input_upper)
+    if decay is not None:
+        mpc.bounds["lower", "_u", "cbf_decay"] = cfg.optimal_decay_lower
+        mpc.bounds["upper", "_u", "cbf_decay"] = cfg.optimal_decay_upper
 
     for builder in constraint_builders:
         builder(model, mpc, x, u, ca)

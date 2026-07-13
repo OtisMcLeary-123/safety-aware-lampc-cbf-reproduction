@@ -15,6 +15,8 @@ from .smoothness import SmoothnessMetrics
 class SmoothDynamicConfig:
     delta_u_weight: float = 0.5
     jerk_weight: float = 0.0
+    optimal_decay_weight: float = 0.0
+    optimal_decay_lower: float = 0.1
     gamma: float = 0.10
     seed: int = 11
     max_steps: int = 260
@@ -48,8 +50,10 @@ class SmoothDynamicConfig:
     output_dir: str = "artifacts/smoothness_ablation/spline_du_0.5"
 
     def __post_init__(self) -> None:
-        if self.delta_u_weight < 0.0 or self.jerk_weight < 0.0:
+        if self.delta_u_weight < 0.0 or self.jerk_weight < 0.0 or self.optimal_decay_weight < 0.0:
             raise ValueError("smoothness weights must be non-negative")
+        if not 0.0 < self.optimal_decay_lower <= 1.0:
+            raise ValueError("optimal_decay_lower must be in (0, 1]")
         if not 0.0 < self.gamma <= 0.15:
             raise ValueError("paper experiment requires 0 < gamma <= 0.15")
         if self.max_steps < 1 or self.render_stride < 1:
@@ -95,6 +99,8 @@ class SmoothDynamicResult:
     gamma_updates_rejected: int
     reflex_interventions: int
     reflex_backups: int
+    mean_optimal_decay: float
+    minimum_optimal_decay: float
     smoothness: SmoothnessMetrics
     output_dir: str
 
@@ -212,7 +218,7 @@ class ReferenceObstacleTVP:
     def configure(self, model: Any, mpc: Any, x: Any, u: Any, ca: Any) -> None:
         import numpy as np
 
-        del model, u
+        del u
         if (
             self._obstacle_tvp is None
             or self._obstacle_next_tvp is None
@@ -232,9 +238,14 @@ class ReferenceObstacleTVP:
             - self._robust_radius_next_tvp**2
         )
         if self.safety_mode == "cbf":
+            decay = (
+                model.u["cbf_decay"]
+                if "cbf_decay" in model.u.keys()
+                else 1.0
+            )
             mpc.set_nl_cons(
                 "dynamic_obstacle_cbf",
-                (1.0 - self._gamma_tvp) * h_current - h_next,
+                decay * (1.0 - self._gamma_tvp) * h_current - h_next,
                 ub=0.0,
             )
         elif self.safety_mode == "distance":
@@ -387,6 +398,8 @@ def run_smooth_dynamic_demo(
         mpc_config = PaperMPCConfig(
             linear_delta_u_weight=cfg.delta_u_weight,
             linear_jerk_weight=cfg.jerk_weight,
+            optimal_decay_weight=cfg.optimal_decay_weight,
+            optimal_decay_lower=cfg.optimal_decay_lower,
             target_tvp_name="reference_state",
         )
         tvp = ReferenceObstacleTVP(
@@ -446,6 +459,7 @@ def run_smooth_dynamic_demo(
         rejected_gamma_updates = 0
         gamma_trace: list[float] = []
         reflex_audits: list[dict[str, Any]] = []
+        optimal_decay_trace: list[float] = []
 
         for step_index in range(cfg.max_steps):
             elapsed = step_index * mpc_config.dt
@@ -500,12 +514,17 @@ def run_smooth_dynamic_demo(
             if mpc_config.uses_jerk_state:
                 measured_state = np.concatenate([measured_state, previous_increment])
             started = perf_counter()
-            candidate = np.asarray(
+            raw_candidate = np.asarray(
                 mpc.make_step(measured_state.reshape(-1, 1)), dtype=float
             ).reshape(-1)
             solve_times.append(perf_counter() - started)
-            if candidate.shape != (4,) or not np.all(np.isfinite(candidate)):
+            expected_dimension = 5 if mpc_config.uses_optimal_decay else 4
+            if raw_candidate.shape != (expected_dimension,) or not np.all(np.isfinite(raw_candidate)):
                 raise RuntimeError("MPC returned an invalid control vector")
+            candidate = raw_candidate[:4].copy()
+            optimal_decay_trace.append(
+                float(raw_candidate[4]) if mpc_config.uses_optimal_decay else 1.0
+            )
             nominal_candidate = candidate.copy()
             if cfg.safety_reflex_enabled and cfg.safety_mode != "none":
                 prediction_age = max(0.0, elapsed - tvp.observer.timestamp)
@@ -654,6 +673,8 @@ def run_smooth_dynamic_demo(
             gamma_updates_rejected=rejected_gamma_updates,
             reflex_interventions=len(reflex_audits),
             reflex_backups=sum(int(item["backup_used"]) for item in reflex_audits),
+            mean_optimal_decay=float(np.mean(optimal_decay_trace)),
+            minimum_optimal_decay=float(np.min(optimal_decay_trace)),
             smoothness=smoothness,
             output_dir=str(output_dir),
         )
@@ -682,6 +703,7 @@ def run_smooth_dynamic_demo(
             "controls": controls_array.tolist(),
             "nominal_controls": np.asarray(nominal_controls).tolist(),
             "reflex_audits": reflex_audits,
+            "optimal_decay_trace": optimal_decay_trace,
             "true_clearances": true_clearances,
             "measured_clearances": measured_clearances,
             "goal_distances": goal_distances,

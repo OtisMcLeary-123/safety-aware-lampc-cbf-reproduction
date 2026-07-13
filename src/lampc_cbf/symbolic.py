@@ -71,6 +71,22 @@ def discrete_cbf_value(h_current: Real, h_next: Real, gamma: Real) -> float:
     return float(h_next) - (1.0 - float(gamma)) * float(h_current)
 
 
+def optimal_decay_cbf_value(
+    h_current: Real, h_next: Real, gamma: Real, decay: Real
+) -> float:
+    """Return ``h_next - decay*(1-gamma)*h_current`` for ``0 < decay <= 1``.
+
+    A positive decay can relax the contraction rate while preserving
+    ``h_next >= 0`` whenever ``h_current >= 0``.  Values above one or at/below
+    zero are intentionally excluded by this reproduction's safety boundary.
+    """
+
+    _validate_gamma(gamma)
+    if not 0 < decay <= 1:
+        raise ValueError("optimal decay must satisfy 0 < decay <= 1")
+    return float(h_next) - float(decay) * (1.0 - float(gamma)) * float(h_current)
+
+
 def quadratic_form_value(state: Sequence[Real], phi: Sequence[Sequence[Real]]) -> float:
     """Evaluate ``state.T @ phi @ state`` without NumPy."""
 
@@ -123,6 +139,15 @@ def discrete_cbf_expression(h_current: Any, h_next: Any, gamma: Any) -> Any:
     return h_next - (1 - gamma) * h_current
 
 
+def optimal_decay_cbf_expression(
+    h_current: Any, h_next: Any, gamma: Any, decay: Any
+) -> Any:
+    """Build the bounded optimal-decay discrete CBF residual."""
+
+    _require_casadi()
+    return h_next - decay * (1 - gamma) * h_current
+
+
 def regularizer_expression(
     state: Any,
     phi: Any,
@@ -136,4 +161,3 @@ def regularizer_expression(
     casadi = _require_casadi()
     quadratic_term = casadi.mtimes([state.T, phi, state])
     return lambda3 * quadratic_term + lambda4 * casadi.sin(2 * state[psi_index]) ** 2
-
