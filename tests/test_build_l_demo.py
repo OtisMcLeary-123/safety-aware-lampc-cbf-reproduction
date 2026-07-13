@@ -1,6 +1,6 @@
 import pytest
 
-from lampc_cbf.build_l_demo import BuildLDemoConfig
+from lampc_cbf.build_l_demo import BuildLDemoConfig, _evaluate_task_success
 
 
 def test_build_l_config_defaults() -> None:
@@ -33,3 +33,43 @@ def test_language_guided_blue_on_red_configuration() -> None:
 def test_blue_on_red_rejects_multiple_cube_indices() -> None:
     with pytest.raises(ValueError, match="blue-on-red"):
         BuildLDemoConfig(place_blue_on_red=True)
+
+
+def test_advisory_waypoint_does_not_fail_successful_safe_task() -> None:
+    success, collision_free = _evaluate_task_success(
+        [
+            {"stage": "approach", "reached": True, "required_for_success": True},
+            {
+                "stage": "transport_avoid",
+                "reached": False,
+                "required_for_success": False,
+            },
+            {"stage": "place", "reached": True, "required_for_success": True},
+        ],
+        cubes_placed=1,
+        expected_cubes=1,
+        clearances=(0.02,),
+        dynamic_clearances=(0.03,),
+    )
+    assert success
+    assert collision_free
+
+
+def test_collision_or_failed_required_stage_still_fails_task() -> None:
+    failed_stage, _ = _evaluate_task_success(
+        [{"stage": "place", "reached": False, "required_for_success": True}],
+        cubes_placed=1,
+        expected_cubes=1,
+        clearances=(0.02,),
+        dynamic_clearances=(0.03,),
+    )
+    collision, collision_free = _evaluate_task_success(
+        [{"stage": "place", "reached": True, "required_for_success": True}],
+        cubes_placed=1,
+        expected_cubes=1,
+        clearances=(0.02,),
+        dynamic_clearances=(-0.001,),
+    )
+    assert not failed_stage
+    assert not collision
+    assert not collision_free

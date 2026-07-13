@@ -74,6 +74,7 @@ class BuildLDemoConfig:
 @dataclass(frozen=True, slots=True)
 class BuildLDemoResult:
     success: bool
+    collision_free: bool
     cubes_placed: int
     total_steps: int
     minimum_clearance: float
@@ -134,6 +135,33 @@ def _project_world_points(
             (1.0 - normalized[:, 1]) * 0.5 * height,
         ]
     )
+
+
+def _evaluate_task_success(
+    stage_events: Sequence[dict[str, Any]],
+    *,
+    cubes_placed: int,
+    expected_cubes: int,
+    clearances: Sequence[float],
+    dynamic_clearances: Sequence[float],
+) -> tuple[bool, bool]:
+    """Return ``(success, collision_free)`` using paper-level task criteria."""
+
+    required_stages_reached = all(
+        bool(event["reached"])
+        for event in stage_events
+        if event.get("required_for_success", True)
+    )
+    collision_free = bool(
+        (not clearances or min(clearances) >= 0.0)
+        and (not dynamic_clearances or min(dynamic_clearances) >= 0.0)
+    )
+    success = bool(
+        required_stages_reached
+        and cubes_placed == expected_cubes
+        and collision_free
+    )
+    return success, collision_free
 
 
 def run_build_l_mpc_cbf_demo(
@@ -276,7 +304,13 @@ def run_build_l_mpc_cbf_demo(
             advance_dynamic_obstacle()
             record_step(())
         stage_events.append(
-            {"stage": label, "start_step": started_at, "end_step": total_steps, "reached": True}
+            {
+                "stage": label,
+                "start_step": started_at,
+                "end_step": total_steps,
+                "reached": True,
+                "required_for_success": True,
+            }
         )
 
     def move_to(
@@ -287,6 +321,7 @@ def run_build_l_mpc_cbf_demo(
         tolerance: float | None = None,
         dynamic_cbf: bool = True,
         optimization_spec: OptimizationSpec | None = None,
+        required_for_success: bool = True,
     ) -> bool:
         nonlocal total_steps, active_stage
         active_stage = label
@@ -404,7 +439,13 @@ def run_build_l_mpc_cbf_demo(
             advance_dynamic_obstacle()
             record_step(obstacles)
         stage_events.append(
-            {"stage": label, "start_step": started_at, "end_step": total_steps, "reached": reached}
+            {
+                "stage": label,
+                "start_step": started_at,
+                "end_step": total_steps,
+                "reached": reached,
+                "required_for_success": required_for_success,
+            }
         )
         return reached
 
@@ -626,14 +667,18 @@ def run_build_l_mpc_cbf_demo(
                 waypoint[2] = max(
                     current_position[2], above_target[2], true_obstacle[2]
                 )
-                all_stages_reached &= move_to(
+                waypoint_required = place_spec is None
+                waypoint_reached = move_to(
                     waypoint,
                     other_objects,
                     -1.0,
                     f"cube_{cube_index + 1}_transport_avoid",
                     tolerance=0.025,
                     optimization_spec=place_spec,
+                    required_for_success=waypoint_required,
                 )
+                if waypoint_required:
+                    all_stages_reached &= waypoint_reached
             all_stages_reached &= move_to(
                 above_target,
                 other_objects,
@@ -684,15 +729,20 @@ def run_build_l_mpc_cbf_demo(
         place_errors = np.linalg.norm(final_objects - targets, axis=1)
         selected_errors = place_errors[list(cfg.cube_indices)]
         cubes_placed = int(np.sum(selected_errors < cfg.place_tolerance))
-        success = bool(
-            all_stages_reached and cubes_placed == len(cfg.cube_indices)
-        )
         minimum_clearance = float(min(clearances)) if clearances else float("nan")
         minimum_dynamic_clearance = (
             float(min(dynamic_clearances)) if dynamic_clearances else float("nan")
         )
+        success, collision_free = _evaluate_task_success(
+            stage_events,
+            cubes_placed=cubes_placed,
+            expected_cubes=len(cfg.cube_indices),
+            clearances=clearances,
+            dynamic_clearances=dynamic_clearances,
+        )
         result = BuildLDemoResult(
             success=success,
+            collision_free=collision_free,
             cubes_placed=cubes_placed,
             total_steps=total_steps,
             minimum_clearance=minimum_clearance,
