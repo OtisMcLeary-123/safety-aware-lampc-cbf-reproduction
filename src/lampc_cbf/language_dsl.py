@@ -481,9 +481,10 @@ class SafeNarrateConfig:
     model: str = "Qwen/Qwen3-235B-A22B-Instruct-2507"
     provider: str = "deepinfra"
     token_path: str = "hftoken.txt"
-    timeout_seconds: float = 8.0
+    timeout_seconds: float = 30.0
     temperature: float = 0.0
     seed: int = 17
+    response_format_mode: str = "json_object"
 
     def __post_init__(self) -> None:
         if not self.model or not self.provider:
@@ -492,6 +493,8 @@ class SafeNarrateConfig:
             raise ValueError("timeout_seconds must be positive")
         if not 0.0 <= self.temperature <= 2.0:
             raise ValueError("temperature must be in [0, 2]")
+        if self.response_format_mode not in {"json_object", "json_schema"}:
+            raise ValueError("response_format_mode must be json_object or json_schema")
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,16 +554,24 @@ class HuggingFaceSafeNarratePlanner:
     def _completion(
         self, client: Any, system_prompt: str, user_payload: Mapping[str, Any], schema: Mapping[str, Any]
     ) -> str:
+        response_format: Mapping[str, Any] = schema
+        wire_payload = dict(user_payload)
+        if self.config.response_format_mode == "json_object":
+            # DeepInfra's xgrammar backend rejects several standard schema
+            # features used by this DSL. JSON-object mode constrains syntax;
+            # the same strict local parser remains the semantic trust boundary.
+            response_format = {"type": "json_object"}
+            wire_payload["output_schema"] = schema["json_schema"]["schema"]
         response = client.chat_completion(
             model=self.config.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
-                    "content": json.dumps(user_payload, ensure_ascii=False, sort_keys=True),
+                    "content": json.dumps(wire_payload, ensure_ascii=False, sort_keys=True),
                 },
             ],
-            response_format=schema,
+            response_format=response_format,
             max_tokens=2048,
             temperature=self.config.temperature,
             seed=self.config.seed,

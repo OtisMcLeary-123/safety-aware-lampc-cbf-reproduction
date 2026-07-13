@@ -107,6 +107,23 @@ feedback response arrived too late for every episode. A paired rendered case
 still shows `gamma=0.02` avoiding a collision that the distance constraint does
 not. See [docs/HARD_SCENE_STUDY.md](docs/HARD_SCENE_STUDY.md).
 
+## Run the 500-condition paired safety benchmark
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python scripts/run_paired_benchmark.py --episodes 500 --workers 4
+```
+
+This evaluates eight ablations on identical randomized conditions: static
+distance/CBF, proactive gamma, constant-velocity prediction with an uncertainty
+tube, local OS-CBF gatekeeper, bounded optimal decay, and measured-latency
+asynchronous feedback. The completed study contains 4,000 Safe Panda Gym
+trials. Predictive CBF recorded 0/500 collisions and 72.6% goal success, while
+online feedback reduced success from 26.0% to 23.6% against its otherwise
+identical comparator. These are simulation results, not formal or hardware
+guarantees. See
+[docs/CLAIM_REASSESSMENT_500.md](docs/CLAIM_REASSESSMENT_500.md).
+
 ## Recreate the language-guided pick-and-place figure
 
 ```bash

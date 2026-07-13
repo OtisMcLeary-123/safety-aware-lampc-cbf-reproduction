@@ -215,8 +215,9 @@ def test_two_stage_hf_planner_validates_tp_and_falls_back_for_bad_od(scene, tmp_
     assert result.od_fallbacks == 1
     assert result.optimization_specs[0].constraints[0].object_name == "moving_obstacle"
     assert len(client.calls) == 2
-    assert client.calls[0]["response_format"]["json_schema"]["name"] == "SafeTaskPlan"
-    assert client.calls[1]["response_format"]["json_schema"]["name"] == "SafeOptimizationSpec"
+    assert client.calls[0]["response_format"] == {"type": "json_object"}
+    assert client.calls[1]["response_format"] == {"type": "json_object"}
+    assert "output_schema" in json.loads(client.calls[0]["messages"][1]["content"])
 
 
 def test_two_stage_hf_planner_fails_closed_for_invalid_tp(scene, tmp_path):
