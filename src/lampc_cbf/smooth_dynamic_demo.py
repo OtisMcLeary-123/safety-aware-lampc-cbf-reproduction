@@ -28,6 +28,13 @@ class SmoothDynamicConfig:
     obstacle_velocity: tuple[float, float, float] = (0.06, 0.0, 0.0)
     obstacle_radius: float = 0.10
     collision_radius: float = 0.035
+    prediction_mode: str = "velocity_tube"
+    confidence_multiplier: float = 3.0
+    velocity_error_bound: float = 0.03
+    model_error_growth: float = 0.005
+    max_relative_speed: float = 0.4
+    total_latency: float = 0.04
+    velocity_filter: float = 0.5
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
     safety_mode: str = "cbf"
@@ -52,6 +59,10 @@ class SmoothDynamicConfig:
             raise ValueError("gamma_update_ttl must be positive")
         if self.reference_mode not in {"behind_spline", "straight"}:
             raise ValueError("reference_mode must be behind_spline or straight")
+        if self.prediction_mode not in {"static", "velocity_tube"}:
+            raise ValueError("prediction_mode must be static or velocity_tube")
+        if not 0.0 <= self.velocity_filter <= 1.0:
+            raise ValueError("velocity_filter must be in [0, 1]")
         if self.safety_mode not in {"cbf", "distance", "none"}:
             raise ValueError("safety_mode must be cbf, distance, or none")
         previous_time = -1.0
@@ -96,8 +107,13 @@ class ReferenceObstacleTVP:
         dt: float,
         horizon: int,
         safety_mode: str = "cbf",
+        prediction_mode: str = "velocity_tube",
+        tube_config: Any | None = None,
+        velocity_filter: float = 0.5,
     ) -> None:
         import numpy as np
+
+        from .obstacle_prediction import ConstantVelocityObserver, UncertaintyTubeConfig
 
         self.reference_path = np.asarray(reference_path, dtype=float)
         if self.reference_path.ndim != 2 or self.reference_path.shape[1] != 3:
@@ -105,6 +121,10 @@ class ReferenceObstacleTVP:
         self.measurement = np.asarray(
             initial_obstacle_measurement, dtype=float
         ).reshape(3)
+        self.observer = ConstantVelocityObserver(
+            tuple(float(value) for value in self.measurement),
+            velocity_filter=velocity_filter,
+        )
         self.reference_speed = reference_speed
         self.combined_radius = obstacle_radius + collision_radius
         self.gamma = gamma
@@ -113,12 +133,20 @@ class ReferenceObstacleTVP:
         if safety_mode not in {"cbf", "distance", "none"}:
             raise ValueError("invalid safety_mode")
         self.safety_mode = safety_mode
+        if prediction_mode not in {"static", "velocity_tube"}:
+            raise ValueError("invalid prediction_mode")
+        self.prediction_mode = prediction_mode
+        self.tube = tube_config or UncertaintyTubeConfig()
+        self.control_time = 0.0
         segment_lengths = np.linalg.norm(
             np.diff(self.reference_path, axis=0), axis=1
         )
         self.arc_length = np.concatenate([[0.0], np.cumsum(segment_lengths)])
         self.progress_index = 0
         self._obstacle_tvp = None
+        self._obstacle_next_tvp = None
+        self._robust_radius_tvp = None
+        self._robust_radius_next_tvp = None
         self._reference_tvp = None
         self._gamma_tvp = None
 
@@ -130,7 +158,12 @@ class ReferenceObstacleTVP:
         self.gamma = float(gamma)
 
     def update(
-        self, robot_position: Sequence[float], obstacle_measurement: Sequence[float]
+        self,
+        robot_position: Sequence[float],
+        obstacle_measurement: Sequence[float],
+        *,
+        control_time: float = 0.0,
+        measurement_time: float = 0.0,
     ) -> None:
         import numpy as np
 
@@ -138,6 +171,8 @@ class ReferenceObstacleTVP:
         measurement = np.asarray(obstacle_measurement, dtype=float).reshape(3)
         if not np.all(np.isfinite(position)) or not np.all(np.isfinite(measurement)):
             raise ValueError("TVP updates must be finite 3-vectors")
+        if control_time < 0.0 or measurement_time < 0.0 or measurement_time > control_time + 1e-12:
+            raise ValueError("TVP times must satisfy 0 <= measurement_time <= control_time")
         # A short backward allowance prevents numerical tracking noise from
         # permanently skipping the closest point while progress remains monotone.
         start = max(0, self.progress_index - 4)
@@ -145,11 +180,22 @@ class ReferenceObstacleTVP:
         nearest = start + int(np.argmin(distances))
         self.progress_index = max(self.progress_index, nearest)
         self.measurement = measurement.copy()
+        self.control_time = float(control_time)
+        self.observer.observe(measurement, float(measurement_time))
 
     def declare(self, model: Any, x: Any, u: Any, ca: Any) -> None:
         del x, u, ca
         self._obstacle_tvp = model.set_variable(
             "_tvp", "obstacle_position", shape=(3, 1)
+        )
+        self._obstacle_next_tvp = model.set_variable(
+            "_tvp", "obstacle_next_position", shape=(3, 1)
+        )
+        self._robust_radius_tvp = model.set_variable(
+            "_tvp", "obstacle_robust_radius", shape=(1, 1)
+        )
+        self._robust_radius_next_tvp = model.set_variable(
+            "_tvp", "obstacle_next_robust_radius", shape=(1, 1)
         )
         self._reference_tvp = model.set_variable(
             "_tvp", "reference_state", shape=(8, 1)
@@ -162,6 +208,9 @@ class ReferenceObstacleTVP:
         del model, u
         if (
             self._obstacle_tvp is None
+            or self._obstacle_next_tvp is None
+            or self._robust_radius_tvp is None
+            or self._robust_radius_next_tvp is None
             or self._reference_tvp is None
             or self._gamma_tvp is None
         ):
@@ -169,10 +218,11 @@ class ReferenceObstacleTVP:
         position = x[:3]
         next_position = position + self.dt * x[4:7]
         h_current = (
-            ca.sumsqr(position - self._obstacle_tvp) - self.combined_radius**2
+            ca.sumsqr(position - self._obstacle_tvp) - self._robust_radius_tvp**2
         )
         h_next = (
-            ca.sumsqr(next_position - self._obstacle_tvp) - self.combined_radius**2
+            ca.sumsqr(next_position - self._obstacle_next_tvp)
+            - self._robust_radius_next_tvp**2
         )
         if self.safety_mode == "cbf":
             mpc.set_nl_cons(
@@ -210,9 +260,30 @@ class ReferenceObstacleTVP:
                 reference_state = np.concatenate(
                     [point, [0.0], desired_velocity, [0.0]]
                 )
+                stage_age = max(0.0, self.control_time - self.observer.timestamp) + stage * self.dt
+                next_age = stage_age + self.dt
+                if self.prediction_mode == "velocity_tube":
+                    obstacle_position = np.asarray(
+                        self.observer.predict(self.observer.timestamp + stage_age), dtype=float
+                    )
+                    obstacle_next_position = np.asarray(
+                        self.observer.predict(self.observer.timestamp + next_age), dtype=float
+                    )
+                    robust_radius = self.combined_radius + self.tube.inflation(stage_age)
+                    robust_radius_next = self.combined_radius + self.tube.inflation(next_age)
+                else:
+                    obstacle_position = self.measurement
+                    obstacle_next_position = self.measurement
+                    robust_radius = self.combined_radius
+                    robust_radius_next = self.combined_radius
                 template["_tvp", stage, "obstacle_position"] = (
-                    self.measurement.reshape(3, 1)
+                    obstacle_position.reshape(3, 1)
                 )
+                template["_tvp", stage, "obstacle_next_position"] = (
+                    obstacle_next_position.reshape(3, 1)
+                )
+                template["_tvp", stage, "obstacle_robust_radius"] = robust_radius
+                template["_tvp", stage, "obstacle_next_robust_radius"] = robust_radius_next
                 template["_tvp", stage, "reference_state"] = (
                     reference_state.reshape(8, 1)
                 )
@@ -237,6 +308,7 @@ def run_smooth_dynamic_demo(
     from .controller import PaperMPCConfig, build_mpc_controller
     from .async_gamma import AtomicGammaStore, GammaUpdate, GammaUpdateQueue
     from .demo import paper_control_to_safe_panda_action
+    from .obstacle_prediction import UncertaintyTubeConfig
     from .smoothness import (
         calculate_smoothness_metrics,
         make_reference_bspline,
@@ -314,6 +386,16 @@ def run_smooth_dynamic_demo(
             dt=mpc_config.dt,
             horizon=mpc_config.horizon,
             safety_mode=cfg.safety_mode,
+            prediction_mode=cfg.prediction_mode,
+            tube_config=UncertaintyTubeConfig(
+                measurement_sigma=cfg.measurement_noise_sigma,
+                confidence_multiplier=cfg.confidence_multiplier,
+                velocity_error_bound=cfg.velocity_error_bound,
+                model_error_growth=cfg.model_error_growth,
+                max_relative_speed=cfg.max_relative_speed,
+                total_latency=cfg.total_latency,
+            ),
+            velocity_filter=cfg.velocity_filter,
         )
         _, mpc = build_mpc_controller(
             mpc_config,
@@ -330,6 +412,7 @@ def run_smooth_dynamic_demo(
         reached_goal = False
         collision = False
         next_sensor_time = cfg.sensor_period
+        last_measurement_time = 0.0
         schedule_index = 0
         gamma_queue = GammaUpdateQueue()
         gamma_store = AtomicGammaStore(cfg.gamma, clock_skew_tolerance=0.0)
@@ -376,10 +459,16 @@ def run_smooth_dynamic_demo(
                     0.0, cfg.measurement_noise_sigma, size=3
                 )
                 sensor_update_steps.append(step_index)
+                last_measurement_time = elapsed
                 next_sensor_time += cfg.sensor_period
 
             position = np.asarray(observation["achieved_goal"], dtype=float)
-            tvp.update(position, measurement)
+            tvp.update(
+                position,
+                measurement,
+                control_time=elapsed,
+                measurement_time=last_measurement_time,
+            )
             measured_state = np.concatenate([position, [0.0], previous_control])
             if mpc_config.uses_jerk_state:
                 measured_state = np.concatenate([measured_state, previous_increment])
@@ -507,6 +596,13 @@ def run_smooth_dynamic_demo(
             "route_points": route_points.tolist(),
             "reference_path": reference_path.tolist(),
             "sensor_update_steps": sensor_update_steps,
+            "estimated_obstacle_velocity": list(tvp.observer.velocity),
+            "uncertainty_assumption": {
+                "mode": cfg.prediction_mode,
+                "bounded_measurement_error_m": tvp.tube.measurement_bound,
+                "latency_inflation_m": tvp.tube.latency_bound,
+                "gaussian_noise_is_deterministically_bounded": False,
+            },
             "applied_gamma_updates": applied_gamma_updates,
             "gamma_trace": gamma_trace,
             "positions": raw_positions.tolist(),
