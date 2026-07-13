@@ -132,11 +132,47 @@ OPTIMIZATION_SPEC_SCHEMA: dict[str, Any] = {
                     "type": "object",
                     "properties": {
                         "workspace_lower_m": {
-                            "type": "array", "items": {"type": "number"},
+                            "type": "array",
+                            "prefixItems": [
+                                {
+                                    "type": "number",
+                                    "minimum": SAFE_PANDA_WORKSPACE_LOWER_M[0],
+                                    "maximum": SAFE_PANDA_WORKSPACE_UPPER_M[0],
+                                },
+                                {
+                                    "type": "number",
+                                    "minimum": SAFE_PANDA_WORKSPACE_LOWER_M[1],
+                                    "maximum": SAFE_PANDA_WORKSPACE_UPPER_M[1],
+                                },
+                                {
+                                    "type": "number",
+                                    "minimum": SAFE_PANDA_WORKSPACE_LOWER_M[2],
+                                    "maximum": SAFE_PANDA_WORKSPACE_UPPER_M[2],
+                                },
+                            ],
+                            "items": False,
                             "minItems": 3, "maxItems": 3,
                         },
                         "workspace_upper_m": {
-                            "type": "array", "items": {"type": "number"},
+                            "type": "array",
+                            "prefixItems": [
+                                {
+                                    "type": "number",
+                                    "minimum": SAFE_PANDA_WORKSPACE_LOWER_M[0],
+                                    "maximum": SAFE_PANDA_WORKSPACE_UPPER_M[0],
+                                },
+                                {
+                                    "type": "number",
+                                    "minimum": SAFE_PANDA_WORKSPACE_LOWER_M[1],
+                                    "maximum": SAFE_PANDA_WORKSPACE_UPPER_M[1],
+                                },
+                                {
+                                    "type": "number",
+                                    "minimum": SAFE_PANDA_WORKSPACE_LOWER_M[2],
+                                    "maximum": SAFE_PANDA_WORKSPACE_UPPER_M[2],
+                                },
+                            ],
+                            "items": False,
                             "minItems": 3, "maxItems": 3,
                         },
                         "linear_speed_limit_mps": {
@@ -203,6 +239,12 @@ version, objective, safety, limits, and constraints. For collision_clearance,
 use object=<avoided object>, clearance_m within the schema bounds, and
 value_m=null. The chosen workspace must contain the resolved target and remain
 inside the hard Safe Panda envelope included in the schema and scene context.
+The hard envelope is axis-specific: -0.30 <= x <= 0.25,
+-0.30 <= y <= 0.30, and 0.00 <= z <= 0.50 meters. In particular,
+workspace_upper_m[0] MUST NOT exceed 0.25. Each lower coordinate must be
+strictly smaller than the corresponding upper coordinate. If uncertain, use
+workspace_lower_m=[-0.30,-0.30,0.00] and
+workspace_upper_m=[0.25,0.30,0.50].
 Never emit mathematical source code, Python, CasADi, prose, or extra fields."""
 
 

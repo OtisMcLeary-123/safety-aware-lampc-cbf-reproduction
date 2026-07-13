@@ -6,6 +6,8 @@ from lampc_cbf.language_dsl import (
     DSL_VERSION,
     HuggingFaceSafeNarratePlanner,
     LanguageDSLInferenceError,
+    OD_SYSTEM_PROMPT,
+    OPTIMIZATION_SPEC_SCHEMA,
     SafeNarrateConfig,
     SceneObject,
     TP_SYSTEM_PROMPT,
@@ -365,6 +367,21 @@ def test_tp_prompt_encodes_the_strict_e1_gripper_grammar():
     assert "close_gripper with target=null and avoid=[]" in TP_SYSTEM_PROMPT
     assert "open_gripper with target=null and avoid=[]" in TP_SYSTEM_PROMPT
     assert "exactly this action grammar" in TP_SYSTEM_PROMPT
+
+
+def test_od_schema_and_prompt_encode_axis_specific_workspace_envelope():
+    limits = OPTIMIZATION_SPEC_SCHEMA["json_schema"]["schema"]["properties"]["limits"]
+    properties = limits["properties"]
+    upper_axes = properties["workspace_upper_m"]["prefixItems"]
+    lower_axes = properties["workspace_lower_m"]["prefixItems"]
+    assert [axis["maximum"] for axis in upper_axes] == pytest.approx(
+        (0.25, 0.30, 0.50)
+    )
+    assert [axis["minimum"] for axis in lower_axes] == pytest.approx(
+        (-0.30, -0.30, 0.00)
+    )
+    assert properties["workspace_upper_m"]["items"] is False
+    assert "workspace_upper_m[0] MUST NOT exceed 0.25" in OD_SYSTEM_PROMPT
     HuggingFaceSafeNarratePlanner,
     LanguageDSLInferenceError,
     SafeNarrateConfig,
