@@ -35,6 +35,9 @@ class SmoothDynamicConfig:
     max_relative_speed: float = 0.4
     total_latency: float = 0.04
     velocity_filter: float = 0.5
+    safety_reflex_enabled: bool = True
+    reflex_lookahead_steps: int = 8
+    reflex_alpha: float = 4.0
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
     safety_mode: str = "cbf"
@@ -63,6 +66,8 @@ class SmoothDynamicConfig:
             raise ValueError("prediction_mode must be static or velocity_tube")
         if not 0.0 <= self.velocity_filter <= 1.0:
             raise ValueError("velocity_filter must be in [0, 1]")
+        if self.reflex_lookahead_steps < 1 or self.reflex_alpha <= 0.0:
+            raise ValueError("reflex lookahead and alpha must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
             raise ValueError("safety_mode must be cbf, distance, or none")
         previous_time = -1.0
@@ -88,6 +93,8 @@ class SmoothDynamicResult:
     final_gamma: float
     gamma_updates_applied: int
     gamma_updates_rejected: int
+    reflex_interventions: int
+    reflex_backups: int
     smoothness: SmoothnessMetrics
     output_dir: str
 
@@ -309,6 +316,11 @@ def run_smooth_dynamic_demo(
     from .async_gamma import AtomicGammaStore, GammaUpdate, GammaUpdateQueue
     from .demo import paper_control_to_safe_panda_action
     from .obstacle_prediction import UncertaintyTubeConfig
+    from .safety_reflex import (
+        OperationalSpaceSafetyReflex,
+        ReflexObstacle,
+        SafetyReflexConfig,
+    )
     from .smoothness import (
         calculate_smoothness_metrics,
         make_reference_bspline,
@@ -328,6 +340,7 @@ def run_smooth_dynamic_demo(
     true_obstacles: list[Any] = []
     measured_obstacles: list[Any] = []
     controls: list[Any] = []
+    nominal_controls: list[Any] = []
     true_clearances: list[float] = []
     measured_clearances: list[float] = []
     goal_distances: list[float] = []
@@ -402,6 +415,19 @@ def run_smooth_dynamic_demo(
             model_builders=(tvp.declare,),
             constraint_builders=(tvp.configure,),
         )
+        reflex = OperationalSpaceSafetyReflex(
+            SafetyReflexConfig(
+                dt=mpc_config.dt,
+                lookahead_steps=cfg.reflex_lookahead_steps,
+                cbf_alpha=cfg.reflex_alpha,
+                speed_limit=mpc_config.linear_input_limit,
+                uncertainty_growth_per_second=(
+                    cfg.velocity_error_bound + cfg.model_error_growth
+                    if cfg.prediction_mode == "velocity_tube"
+                    else 0.0
+                ),
+            )
+        )
         previous_control = np.zeros(4)
         previous_increment = np.zeros(4)
         initial_state = np.concatenate([start, [0.0], previous_control])
@@ -419,6 +445,7 @@ def run_smooth_dynamic_demo(
         applied_gamma_updates: list[dict[str, float]] = []
         rejected_gamma_updates = 0
         gamma_trace: list[float] = []
+        reflex_audits: list[dict[str, Any]] = []
 
         for step_index in range(cfg.max_steps):
             elapsed = step_index * mpc_config.dt
@@ -479,6 +506,46 @@ def run_smooth_dynamic_demo(
             solve_times.append(perf_counter() - started)
             if candidate.shape != (4,) or not np.all(np.isfinite(candidate)):
                 raise RuntimeError("MPC returned an invalid control vector")
+            nominal_candidate = candidate.copy()
+            if cfg.safety_reflex_enabled and cfg.safety_mode != "none":
+                prediction_age = max(0.0, elapsed - tvp.observer.timestamp)
+                estimated_position = tvp.observer.predict(elapsed)
+                estimated_velocity = (
+                    tvp.observer.velocity
+                    if cfg.prediction_mode == "velocity_tube"
+                    else (0.0, 0.0, 0.0)
+                )
+                uncertainty = (
+                    tvp.tube.inflation(prediction_age)
+                    if cfg.prediction_mode == "velocity_tube"
+                    else 0.0
+                )
+                reflex_result = reflex.gate(
+                    position,
+                    candidate[:3],
+                    (
+                        ReflexObstacle(
+                            tuple(float(value) for value in estimated_position),
+                            tuple(float(value) for value in estimated_velocity),
+                            combined_radius,
+                            uncertainty,
+                            "moving_obstacle",
+                        ),
+                    ),
+                )
+                candidate[:3] = reflex_result.velocity
+                if reflex_result.intervened:
+                    reflex_audits.append(
+                        {
+                            "step": step_index,
+                            "time": elapsed,
+                            "backup_used": reflex_result.backup_used,
+                            "reason": reflex_result.reason,
+                            "nominal_minimum_clearance": reflex_result.nominal_minimum_clearance,
+                            "filtered_minimum_clearance": reflex_result.filtered_minimum_clearance,
+                            "maximum_cbf_violation": reflex_result.maximum_cbf_violation,
+                        }
+                    )
             action = paper_control_to_safe_panda_action(
                 candidate, env.action_space.shape[0],
                 linear_input_limit=mpc_config.linear_input_limit,
@@ -502,6 +569,7 @@ def run_smooth_dynamic_demo(
             true_obstacles.append(true_obstacle.copy())
             measured_obstacles.append(measurement.copy())
             controls.append(candidate.copy())
+            nominal_controls.append(nominal_candidate)
             true_clearances.append(true_clearance)
             measured_clearances.append(measured_clearance)
             goal_distances.append(goal_distance)
@@ -584,6 +652,8 @@ def run_smooth_dynamic_demo(
             final_gamma=tvp.gamma,
             gamma_updates_applied=len(applied_gamma_updates),
             gamma_updates_rejected=rejected_gamma_updates,
+            reflex_interventions=len(reflex_audits),
+            reflex_backups=sum(int(item["backup_used"]) for item in reflex_audits),
             smoothness=smoothness,
             output_dir=str(output_dir),
         )
@@ -610,6 +680,8 @@ def run_smooth_dynamic_demo(
             "true_obstacles": true_array.tolist(),
             "measured_obstacles": measured_array.tolist(),
             "controls": controls_array.tolist(),
+            "nominal_controls": np.asarray(nominal_controls).tolist(),
+            "reflex_audits": reflex_audits,
             "true_clearances": true_clearances,
             "measured_clearances": measured_clearances,
             "goal_distances": goal_distances,
