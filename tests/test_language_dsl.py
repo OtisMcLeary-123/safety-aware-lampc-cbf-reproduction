@@ -288,11 +288,41 @@ def test_two_stage_hf_planner_validates_tp_and_falls_back_for_bad_od(scene, tmp_
     )
     result = planner.formulate("pick blue cube", scene, current_position=(0, 0, 0.1))
     assert result.od_fallbacks == 1
+    assert len(result.od_attempts) == 1
+    assert result.od_attempts[0].status == "fallback"
+    assert result.od_attempts[0].raw_response == '{"objective":"ca.eval(...)"}'
+    assert result.od_attempts[0].cause_type == "ValueError"
     assert result.optimization_specs[0].constraints[0].object_name == "moving_obstacle"
     assert len(client.calls) == 2
     assert client.calls[0]["response_format"] == {"type": "json_object"}
     assert client.calls[1]["response_format"] == {"type": "json_object"}
     assert "output_schema" in json.loads(client.calls[0]["messages"][1]["content"])
+
+
+def test_two_stage_hf_planner_audits_accepted_od(scene, tmp_path):
+    token_path = tmp_path / "token.txt"
+    token_path.write_text("test-token", encoding="utf-8")
+    task_payload = {
+        "version": DSL_VERSION,
+        "steps": [_move(_target(), ["moving_obstacle"])],
+    }
+    od_payload = _optimization_payload(constraints=[_collision()])
+    client = _FakeClient([json.dumps(task_payload), json.dumps(od_payload)])
+    planner = HuggingFaceSafeNarratePlanner(
+        SafeNarrateConfig(token_path=str(token_path)),
+        client_factory=lambda config, token: client,
+    )
+    result = planner.formulate(
+        "pick blue cube",
+        scene,
+        current_position=(0, 0, 0.1),
+        required_hazards=("moving_obstacle",),
+    )
+    assert result.od_fallbacks == 0
+    assert len(result.od_attempts) == 1
+    assert result.od_attempts[0].status == "accepted"
+    assert json.loads(result.od_attempts[0].raw_response) == od_payload
+    assert result.od_attempts[0].cause_type is None
 
 
 def test_two_stage_hf_planner_fails_closed_for_invalid_tp(scene, tmp_path):

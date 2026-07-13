@@ -197,6 +197,12 @@ validated move step to SafeOptimizationSpec JSON. Select only bounded MPC
 parameters and constraints from the supplied schema. The only objective is
 squared_position_error. Every avoided object requires a collision_clearance
 constraint. The resolved target must remain inside the selected workspace.
+Copy the move_step target object exactly into objective.target; do not change
+its kind, object, relation, or vector_m. Return every required root field:
+version, objective, safety, limits, and constraints. For collision_clearance,
+use object=<avoided object>, clearance_m within the schema bounds, and
+value_m=null. The chosen workspace must contain the resolved target and remain
+inside the hard Safe Panda envelope included in the schema and scene context.
 Never emit mathematical source code, Python, CasADi, prose, or extra fields."""
 
 
@@ -686,6 +692,29 @@ class SafeNarrateResult:
     model: str
     provider: str
     instruction_hash: str
+    od_attempts: tuple["ODAttemptAudit", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ODAttemptAudit:
+    task_step_index: int
+    status: str
+    latency_seconds: float
+    raw_response: str | None
+    cause_type: str | None
+    cause_message: str | None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"accepted", "fallback"}:
+            raise ValueError("OD attempt status must be accepted or fallback")
+        if self.latency_seconds < 0.0:
+            raise ValueError("OD attempt latency must be non-negative")
+        if self.status == "accepted" and (
+            self.cause_type is not None or self.cause_message is not None
+        ):
+            raise ValueError("accepted OD attempts cannot contain an error")
+        if self.status == "fallback" and self.cause_type is None:
+            raise ValueError("fallback OD attempts require an error type")
 
 
 class LanguageDSLInferenceError(RuntimeError):
@@ -842,9 +871,10 @@ class HuggingFaceSafeNarratePlanner:
             ) from error
 
         specs: list[OptimizationSpec | None] = []
+        od_attempts: list[ODAttemptAudit] = []
         od_latency = 0.0
         fallbacks = 0
-        for step in plan.steps:
+        for step_index, step in enumerate(plan.steps):
             if step.action != "move":
                 specs.append(None)
                 continue
@@ -862,23 +892,46 @@ class HuggingFaceSafeNarratePlanner:
                 "current_position_m": tuple(float(value) for value in current_position),
                 "scene_objects": scene_payload,
             }
+            started = perf_counter()
+            raw: str | None = None
             try:
-                started = perf_counter()
                 raw = self._completion(
                     client, OD_SYSTEM_PROMPT, od_payload, OPTIMIZATION_SPEC_SCHEMA
                 )
-                od_latency += perf_counter() - started
-                specs.append(
-                    parse_optimization_spec(
+                spec = parse_optimization_spec(
+                    raw,
+                    scene_objects,
+                    current_position=current_position,
+                    required_avoid=step.avoid,
+                )
+                elapsed = perf_counter() - started
+                od_latency += elapsed
+                specs.append(spec)
+                od_attempts.append(
+                    ODAttemptAudit(
+                        step_index,
+                        "accepted",
+                        elapsed,
                         raw,
-                        scene_objects,
-                        current_position=current_position,
-                        required_avoid=step.avoid,
+                        None,
+                        None,
                     )
                 )
-            except Exception:
+            except Exception as error:
+                elapsed = perf_counter() - started
+                od_latency += elapsed
                 fallbacks += 1
                 specs.append(optimization_from_task_step(step, scene_objects))
+                od_attempts.append(
+                    ODAttemptAudit(
+                        step_index,
+                        "fallback",
+                        elapsed,
+                        raw,
+                        type(error).__name__,
+                        str(error),
+                    )
+                )
         return SafeNarrateResult(
             task_plan=plan,
             optimization_specs=tuple(specs),
@@ -888,4 +941,5 @@ class HuggingFaceSafeNarratePlanner:
             model=self.config.model,
             provider=self.config.provider,
             instruction_hash=sha256(instruction.strip().encode("utf-8")).hexdigest(),
+            od_attempts=tuple(od_attempts),
         )
