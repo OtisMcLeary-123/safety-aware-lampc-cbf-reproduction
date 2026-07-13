@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import asdict
 import json
 
 from lampc_cbf.build_l_demo import BuildLDemoConfig, run_build_l_mpc_cbf_demo
 from lampc_cbf.language_dsl import HuggingFaceSafeNarratePlanner
+from lampc_cbf.language_replay import RecordedSafeNarratePlanner
 
 
 USER_INSTRUCTION = (
@@ -16,8 +18,18 @@ USER_INSTRUCTION = (
 )
 
 
-def main() -> int:
-    planner = HuggingFaceSafeNarratePlanner()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--replay-metrics",
+        help="revalidate and replay accepted TP/OD outputs without an API call",
+    )
+    args = parser.parse_args(argv)
+    planner = (
+        RecordedSafeNarratePlanner(args.replay_metrics)
+        if args.replay_metrics
+        else HuggingFaceSafeNarratePlanner()
+    )
     result = run_build_l_mpc_cbf_demo(
         BuildLDemoConfig(
             seed=7,

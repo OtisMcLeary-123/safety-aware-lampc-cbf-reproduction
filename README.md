@@ -131,12 +131,17 @@ source .venv/bin/activate
 PYTHONPATH=src python scripts/run_language_guided_pick_place.py
 ```
 
-This creates a four-cube camera scene, asks the Hugging Face optimization
-formulator for a validated gamma, moves the blue cube onto the red cube around
-a head-on spherical obstacle, and exports an annotated paper-style figure plus
-the full GIF and raw traces. The committed seed-7 run selected `gamma=0.02`,
-placed the cube with 13.23 mm error, and maintained 26.24 mm minimum raw
-clearance outside the CBF boundary. See
+This creates a four-cube camera scene, calls a validated Task Planner and
+Optimization Designer after simulator reset, and executes the resulting safe
+JSON DSL through a trusted pick/place executor. In the committed seed-7 run,
+both OD calls were accepted without fallback and selected `q=1`,
+`delta_u=1`, `gamma=0.05`, a 0.1 m/s speed limit, and 0.05 m obstacle
+clearance. The robot placed the cube with 7.11 mm error, remained
+collision-free, kept 39.10 mm physical clearance outside the gripper-obstacle
+boundary, and kept 1.10 mm raw margin outside the larger active OD-CBF
+boundary. The final visual artifacts are a deterministic simulator replay of
+the recorded, revalidated TP/OD outputs; no LLM API is called during replay.
+See
 [docs/LANGUAGE_GUIDED_PICK_PLACE.md](docs/LANGUAGE_GUIDED_PICK_PLACE.md).
 
 ## Render the Build-L scene

@@ -79,6 +79,7 @@ class BuildLDemoResult:
     total_steps: int
     minimum_clearance: float
     minimum_dynamic_clearance: float
+    minimum_dynamic_cbf_margin: float
     maximum_place_error: float
     mean_solve_time: float
     max_solve_time: float
@@ -89,6 +90,8 @@ class BuildLDemoResult:
     language_od_latency_seconds: float = 0.0
     language_od_fallbacks: int = 0
     language_gammas: tuple[float, ...] = ()
+    language_execution_source: str = "not-used"
+    language_source_metrics: str | None = None
 
 
 def _project_world_points(
@@ -220,10 +223,14 @@ def run_build_l_mpc_cbf_demo(
     frames: list[Any] = []
     frame_stages: list[str] = []
     frame_obstacles: list[Any | None] = []
+    frame_cbf_radii: list[float | None] = []
     end_effector_positions: list[Any] = []
     trajectory_stages: list[str] = []
     clearances: list[float] = []
     dynamic_clearances: list[float] = []
+    dynamic_cbf_margins: list[float] = []
+    dynamic_cbf_margin_stages: list[str] = []
+    dynamic_cbf_boundary_radii: list[float] = []
     obstacle_positions: list[Any] = []
     obstacle_measurements: list[Any] = []
     sensor_update_steps: list[int] = []
@@ -240,6 +247,7 @@ def run_build_l_mpc_cbf_demo(
     language_result: Any | None = None
     trusted_macros: tuple[Any, ...] = ()
     language_scene: tuple[Any, ...] = ()
+    active_dynamic_cbf_radius: float | None = None
 
     def body_positions() -> list[Any]:
         return [
@@ -257,6 +265,7 @@ def run_build_l_mpc_cbf_demo(
                 frame_obstacles.append(
                     None if true_obstacle is None else true_obstacle.copy()
                 )
+                frame_cbf_radii.append(active_dynamic_cbf_radius)
 
     def advance_dynamic_obstacle() -> None:
         nonlocal true_obstacle, measured_obstacle, next_sensor_time
@@ -287,16 +296,24 @@ def run_build_l_mpc_cbf_demo(
             )
         if true_obstacle is not None and measured_obstacle is not None:
             combined_radius = cfg.obstacle_radius + cfg.gripper_collision_radius
+            center_distance = float(np.linalg.norm(position - true_obstacle))
             dynamic_clearances.append(
-                float(np.linalg.norm(position - true_obstacle) - combined_radius)
+                center_distance - combined_radius
             )
+            if active_dynamic_cbf_radius is not None:
+                dynamic_cbf_margins.append(
+                    center_distance - active_dynamic_cbf_radius
+                )
+                dynamic_cbf_margin_stages.append(active_stage)
+                dynamic_cbf_boundary_radii.append(active_dynamic_cbf_radius)
             obstacle_positions.append(true_obstacle.copy())
             obstacle_measurements.append(measured_obstacle.copy())
         record_frame()
 
     def apply_gripper(command: float, steps: int, label: str) -> None:
-        nonlocal total_steps, active_stage
+        nonlocal total_steps, active_stage, active_dynamic_cbf_radius
         active_stage = label
+        active_dynamic_cbf_radius = None
         started_at = total_steps
         for _ in range(steps):
             env.step(np.array([0.0, 0.0, 0.0, command], dtype=np.float32))
@@ -323,7 +340,7 @@ def run_build_l_mpc_cbf_demo(
         optimization_spec: OptimizationSpec | None = None,
         required_for_success: bool = True,
     ) -> bool:
-        nonlocal total_steps, active_stage
+        nonlocal total_steps, active_stage, active_dynamic_cbf_radius
         active_stage = label
         target = np.asarray(target, dtype=float)
         initial_position = np.asarray(env.robot.get_ee_position(), dtype=float)
@@ -402,6 +419,9 @@ def run_build_l_mpc_cbf_demo(
             )
             model_builders = (online_cbf.declare_tvp,)
             constraint_builders += (online_cbf.add_constraint,)
+            active_dynamic_cbf_radius = cfg.obstacle_radius + dynamic_clearance
+        else:
+            active_dynamic_cbf_radius = None
         _, mpc = build_mpc_controller(
             mpc_config,
             model_builders=model_builders,
@@ -447,6 +467,7 @@ def run_build_l_mpc_cbf_demo(
                 "required_for_success": required_for_success,
             }
         )
+        active_dynamic_cbf_radius = None
         return reached
 
     def attach_object(name: str) -> int:
@@ -733,6 +754,11 @@ def run_build_l_mpc_cbf_demo(
         minimum_dynamic_clearance = (
             float(min(dynamic_clearances)) if dynamic_clearances else float("nan")
         )
+        minimum_dynamic_cbf_margin = (
+            float(min(dynamic_cbf_margins))
+            if dynamic_cbf_margins
+            else float("nan")
+        )
         success, collision_free = _evaluate_task_success(
             stage_events,
             cubes_placed=cubes_placed,
@@ -747,6 +773,7 @@ def run_build_l_mpc_cbf_demo(
             total_steps=total_steps,
             minimum_clearance=minimum_clearance,
             minimum_dynamic_clearance=minimum_dynamic_clearance,
+            minimum_dynamic_cbf_margin=minimum_dynamic_cbf_margin,
             maximum_place_error=float(np.max(selected_errors)),
             mean_solve_time=float(np.mean(solve_times)),
             max_solve_time=float(np.max(solve_times)),
@@ -776,6 +803,16 @@ def run_build_l_mpc_cbf_demo(
                     else ()
                 )
                 if spec is not None
+            ),
+            language_execution_source=(
+                getattr(language_planner, "execution_source", "live_api")
+                if language_result is not None
+                else "not-used"
+            ),
+            language_source_metrics=(
+                getattr(language_planner, "source_metrics_path", None)
+                if language_result is not None
+                else None
             ),
         )
 
@@ -869,7 +906,10 @@ def run_build_l_mpc_cbf_demo(
                 )
                 displayed_obstacle = frame_obstacles[display_frame_index]
                 angles = np.linspace(0.0, 2.0 * np.pi, 180)
-                safety_radius = cfg.obstacle_radius + cfg.gripper_collision_radius
+                safety_radius = (
+                    frame_cbf_radii[display_frame_index]
+                    or cfg.obstacle_radius + cfg.gripper_collision_radius
+                )
                 safety_circle = np.column_stack([
                     displayed_obstacle[0] + safety_radius * np.cos(angles),
                     displayed_obstacle[1] + safety_radius * np.sin(angles),
@@ -909,7 +949,7 @@ def run_build_l_mpc_cbf_demo(
                     color="#ffd400",
                     linestyle="--",
                     linewidth=3.0,
-                    label="CBF safety boundary h=0",
+                    label="active OD-CBF boundary h=0",
                 )
                 camera_axis.text(
                     0.02,
@@ -950,7 +990,8 @@ def run_build_l_mpc_cbf_demo(
                     f"selected γ: {result.language_gammas if result.language_plan_used else (cfg.gamma,)}\n"
                     f"TP latency: {result.language_tp_latency_seconds:.3f} s\n"
                     f"OD latency: {result.language_od_latency_seconds:.3f} s\n"
-                    f"OD fallbacks: {result.language_od_fallbacks}",
+                    f"OD fallbacks: {result.language_od_fallbacks}\n"
+                    f"source: {result.language_execution_source}",
                     fontsize=10,
                     va="top",
                     bbox=box_style,
@@ -976,6 +1017,8 @@ def run_build_l_mpc_cbf_demo(
                     f"goal success: {result.success}\n"
                     f"minimum raw clearance: "
                     f"{result.minimum_dynamic_clearance * 1000:.2f} mm\n"
+                    f"minimum raw CBF margin: "
+                    f"{result.minimum_dynamic_cbf_margin * 1000:.2f} mm\n"
                     f"MPC mean solve time: {result.mean_solve_time * 1000:.2f} ms",
                     fontsize=10,
                     va="top",
@@ -985,7 +1028,7 @@ def run_build_l_mpc_cbf_demo(
                     0.02,
                     0.015,
                     "Orange/black are raw executed robot trajectories; red is the "
-                    "nominal direct route; yellow is the CBF set boundary, not a trajectory.",
+                    "nominal direct route; yellow is the active OD-CBF set boundary, not a trajectory.",
                     fontsize=9,
                 )
                 paper_fig.savefig(
@@ -1023,6 +1066,9 @@ def run_build_l_mpc_cbf_demo(
             "trajectory_stages": trajectory_stages,
             "clearances": clearances,
             "dynamic_clearances": dynamic_clearances,
+            "dynamic_cbf_margins": dynamic_cbf_margins,
+            "dynamic_cbf_margin_stages": dynamic_cbf_margin_stages,
+            "dynamic_cbf_boundary_radii": dynamic_cbf_boundary_radii,
             "obstacle_positions": [position.tolist() for position in obstacle_positions],
             "obstacle_measurements": [
                 position.tolist() for position in obstacle_measurements
@@ -1037,7 +1083,7 @@ def run_build_l_mpc_cbf_demo(
                 "orange": "raw executed approach trajectory",
                 "red_dotted": "nominal straight transport reference",
                 "black": "raw executed MPC-CBF transport trajectory",
-                "yellow_dashed": "CBF safety boundary h=0 (not a trajectory)",
+                "yellow_dashed": "active OD-CBF safety boundary h=0 (not a trajectory)",
             },
             "language_control_boundary": (
                 "Validated TP/OD JSON selects the pick/place macro and bounded MPC-CBF "
