@@ -32,6 +32,7 @@ class SmoothDynamicConfig:
     reference_mode: str = "behind_spline"
     safety_mode: str = "cbf"
     gamma_schedule: tuple[tuple[float, float], ...] = ()
+    gamma_update_ttl: float = 1.0
     save_plots: bool = True
     save_metrics: bool = True
     output_dir: str = "artifacts/smoothness_ablation/spline_du_0.5"
@@ -47,6 +48,8 @@ class SmoothDynamicConfig:
             raise ValueError("period and reference speed must be positive")
         if self.measurement_noise_sigma < 0.0:
             raise ValueError("measurement noise must be non-negative")
+        if self.gamma_update_ttl <= 0.0:
+            raise ValueError("gamma_update_ttl must be positive")
         if self.reference_mode not in {"behind_spline", "straight"}:
             raise ValueError("reference_mode must be behind_spline or straight")
         if self.safety_mode not in {"cbf", "distance", "none"}:
@@ -73,6 +76,7 @@ class SmoothDynamicResult:
     max_solve_time: float
     final_gamma: float
     gamma_updates_applied: int
+    gamma_updates_rejected: int
     smoothness: SmoothnessMetrics
     output_dir: str
 
@@ -231,6 +235,7 @@ def run_smooth_dynamic_demo(
     import panda_gym  # noqa: F401
 
     from .controller import PaperMPCConfig, build_mpc_controller
+    from .async_gamma import AtomicGammaStore, GammaUpdate, GammaUpdateQueue
     from .demo import paper_control_to_safe_panda_action
     from .smoothness import (
         calculate_smoothness_metrics,
@@ -326,7 +331,10 @@ def run_smooth_dynamic_demo(
         collision = False
         next_sensor_time = cfg.sensor_period
         schedule_index = 0
+        gamma_queue = GammaUpdateQueue()
+        gamma_store = AtomicGammaStore(cfg.gamma, clock_skew_tolerance=0.0)
         applied_gamma_updates: list[dict[str, float]] = []
+        rejected_gamma_updates = 0
         gamma_trace: list[float] = []
 
         for step_index in range(cfg.max_steps):
@@ -336,15 +344,33 @@ def run_smooth_dynamic_demo(
                 and elapsed + 1e-12 >= cfg.gamma_schedule[schedule_index][0]
             ):
                 scheduled_time, scheduled_gamma = cfg.gamma_schedule[schedule_index]
-                tvp.update_gamma(scheduled_gamma)
-                applied_gamma_updates.append(
-                    {
-                        "scheduled_time": scheduled_time,
-                        "applied_time": elapsed,
-                        "gamma": scheduled_gamma,
-                    }
+                gamma_queue.publish(
+                    GammaUpdate(
+                        gamma=scheduled_gamma,
+                        version=schedule_index + 1,
+                        created_at=elapsed,
+                        valid_until=elapsed + cfg.gamma_update_ttl,
+                        reason="scheduled_online_feedback",
+                        source="benchmark_replay",
+                    )
                 )
                 schedule_index += 1
+            gamma_audit = gamma_store.apply_pending(gamma_queue, now=elapsed)
+            rejected_gamma_updates += (
+                gamma_audit.rejected_expired
+                + gamma_audit.rejected_old_version
+                + gamma_audit.rejected_future
+            )
+            if gamma_audit.applied is not None:
+                tvp.update_gamma(gamma_audit.applied.gamma)
+                applied_gamma_updates.append(
+                    {
+                        "scheduled_time": gamma_audit.applied.created_at,
+                        "applied_time": elapsed,
+                        "gamma": gamma_audit.applied.gamma,
+                        "version": gamma_audit.applied.version,
+                    }
+                )
             if elapsed + 1e-12 >= next_sensor_time:
                 measurement = true_obstacle + rng.normal(
                     0.0, cfg.measurement_noise_sigma, size=3
@@ -468,6 +494,7 @@ def run_smooth_dynamic_demo(
             max_solve_time=float(np.max(solve_times)),
             final_gamma=tvp.gamma,
             gamma_updates_applied=len(applied_gamma_updates),
+            gamma_updates_rejected=rejected_gamma_updates,
             smoothness=smoothness,
             output_dir=str(output_dir),
         )
