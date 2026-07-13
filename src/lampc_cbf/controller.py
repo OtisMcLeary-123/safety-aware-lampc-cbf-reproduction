@@ -44,6 +44,7 @@ class PaperMPCConfig:
     velocity_regularization: float = 0.1
     yaw_regularization: float = 5e-5
     position_lower: tuple[float, float, float] = (-3.0, -3.0, 0.0)
+    position_upper: tuple[float, float, float] = (inf, inf, inf)
     yaw_lower: float = -0.55 * pi
     yaw_upper: float = 0.55 * pi
     linear_input_limit: float = 0.2
@@ -56,6 +57,10 @@ class PaperMPCConfig:
             raise ValueError("horizon must be at least one")
         if len(self.target) != 8:
             raise ValueError("target must contain exactly 8 state values")
+        if len(self.position_lower) != 3 or len(self.position_upper) != 3:
+            raise ValueError("position bounds must contain exactly 3 values")
+        if any(lower >= upper for lower, upper in zip(self.position_lower, self.position_upper)):
+            raise ValueError("position lower bounds must be smaller than upper bounds")
         if self.yaw_lower >= self.yaw_upper:
             raise ValueError("yaw_lower must be smaller than yaw_upper")
         nonnegative = (
@@ -93,7 +98,7 @@ class PaperMPCConfig:
 
     @property
     def state_upper(self) -> tuple[float, ...]:
-        return (inf, inf, inf, self.yaw_upper, inf, inf, inf, inf)
+        return (*self.position_upper, self.yaw_upper, inf, inf, inf, inf)
 
     @property
     def input_lower(self) -> tuple[float, ...]:

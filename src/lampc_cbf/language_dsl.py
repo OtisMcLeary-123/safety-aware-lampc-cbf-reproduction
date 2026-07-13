@@ -17,17 +17,28 @@ from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
 
 
-DSL_VERSION = 1
+DSL_VERSION = 2
 MAX_TASK_STEPS = 24
 MAX_CONSTRAINTS = 24
 MAX_JSON_BYTES = 32_768
 MAX_NAME_LENGTH = 64
 
+GAMMA_LEVELS = (0.02, 0.05, 0.08, 0.12, 0.15)
+DELTA_U_LEVELS = (0.5, 1.0, 2.0, 5.0)
+Q_WEIGHT_MIN = 0.1
+Q_WEIGHT_MAX = 10.0
+CLEARANCE_MIN_M = 0.012
+CLEARANCE_MAX_M = 0.10
+LINEAR_SPEED_MIN_MPS = 0.02
+LINEAR_SPEED_MAX_MPS = 0.20
+SAFE_PANDA_WORKSPACE_LOWER_M = (-0.30, -0.30, 0.00)
+SAFE_PANDA_WORKSPACE_UPPER_M = (0.25, 0.30, 0.50)
+
 TASK_ACTIONS = frozenset({"move", "open_gripper", "close_gripper"})
 TARGET_KINDS = frozenset({"object", "absolute", "current_offset"})
 RELATIONS = frozenset({"center", "above", "front", "behind", "left", "right"})
 CONSTRAINT_KINDS = frozenset(
-    {"collision_clearance", "minimum_height", "maximum_height", "workspace_box"}
+    {"collision_clearance", "minimum_height", "maximum_height"}
 )
 
 
@@ -96,9 +107,47 @@ OPTIMIZATION_SPEC_SCHEMA: dict[str, Any] = {
                     "properties": {
                         "kind": {"type": "string", "const": "squared_position_error"},
                         "target": TASK_PLAN_SCHEMA["json_schema"]["schema"]["properties"]["steps"]["items"]["properties"]["target"],
-                        "weight": {"type": "number", "minimum": 0.01, "maximum": 100.0},
+                        "q_weight": {
+                            "type": "number", "minimum": Q_WEIGHT_MIN,
+                            "maximum": Q_WEIGHT_MAX,
+                        },
+                        "linear_delta_u_weight": {
+                            "type": "number", "enum": list(DELTA_U_LEVELS),
+                        },
                     },
-                    "required": ["kind", "target", "weight"],
+                    "required": [
+                        "kind", "target", "q_weight", "linear_delta_u_weight"
+                    ],
+                    "additionalProperties": False,
+                },
+                "safety": {
+                    "type": "object",
+                    "properties": {
+                        "gamma": {"type": "number", "enum": list(GAMMA_LEVELS)},
+                    },
+                    "required": ["gamma"],
+                    "additionalProperties": False,
+                },
+                "limits": {
+                    "type": "object",
+                    "properties": {
+                        "workspace_lower_m": {
+                            "type": "array", "items": {"type": "number"},
+                            "minItems": 3, "maxItems": 3,
+                        },
+                        "workspace_upper_m": {
+                            "type": "array", "items": {"type": "number"},
+                            "minItems": 3, "maxItems": 3,
+                        },
+                        "linear_speed_limit_mps": {
+                            "type": "number", "minimum": LINEAR_SPEED_MIN_MPS,
+                            "maximum": LINEAR_SPEED_MAX_MPS,
+                        },
+                    },
+                    "required": [
+                        "workspace_lower_m", "workspace_upper_m",
+                        "linear_speed_limit_mps"
+                    ],
                     "additionalProperties": False,
                 },
                 "constraints": {
@@ -109,25 +158,18 @@ OPTIMIZATION_SPEC_SCHEMA: dict[str, Any] = {
                         "properties": {
                             "kind": {"type": "string", "enum": sorted(CONSTRAINT_KINDS)},
                             "object": {"type": ["string", "null"]},
-                            "clearance_m": {"type": "number", "minimum": 0.0, "maximum": 0.5},
+                            "clearance_m": {
+                                "type": "number", "minimum": 0.0,
+                                "maximum": CLEARANCE_MAX_M,
+                            },
                             "value_m": {"type": ["number", "null"]},
-                            "lower_m": {
-                                "type": ["array", "null"], "items": {"type": "number"},
-                                "minItems": 3, "maxItems": 3,
-                            },
-                            "upper_m": {
-                                "type": ["array", "null"], "items": {"type": "number"},
-                                "minItems": 3, "maxItems": 3,
-                            },
                         },
-                        "required": [
-                            "kind", "object", "clearance_m", "value_m", "lower_m", "upper_m"
-                        ],
+                        "required": ["kind", "object", "clearance_m", "value_m"],
                         "additionalProperties": False,
                     },
                 },
             },
-            "required": ["version", "objective", "constraints"],
+            "required": ["version", "objective", "safety", "limits", "constraints"],
             "additionalProperties": False,
         },
     },
@@ -140,8 +182,10 @@ object names. Every move must explicitly list avoided objects. Never emit
 Python, CasADi, prose, function calls, or fields outside the schema."""
 
 OD_SYSTEM_PROMPT = """You are the NARRATE Optimization Designer. Convert one
-validated move step to SafeOptimizationSpec JSON. The only objective is
-squared_position_error and constraints must come from the supplied enum.
+validated move step to SafeOptimizationSpec JSON. Select only bounded MPC
+parameters and constraints from the supplied schema. The only objective is
+squared_position_error. Every avoided object requires a collision_clearance
+constraint. The resolved target must remain inside the selected workspace.
 Never emit mathematical source code, Python, CasADi, prose, or extra fields."""
 
 
@@ -165,6 +209,13 @@ def _finite_number(value: Any, label: str) -> float:
     converted = float(value)
     if not isfinite(converted):
         raise ValueError(f"{label} must be finite")
+    return converted
+
+
+def _enum_number(value: Any, allowed: Sequence[float], label: str) -> float:
+    converted = _finite_number(value, label)
+    if converted not in allowed:
+        raise ValueError(f"{label} must be one of {tuple(allowed)}")
     return converted
 
 
@@ -233,7 +284,20 @@ class TaskPlan:
 @dataclass(frozen=True, slots=True)
 class ObjectiveSpec:
     target: TargetSpec
-    weight: float
+    q_weight: float
+    linear_delta_u_weight: float
+
+
+@dataclass(frozen=True, slots=True)
+class SafetySpec:
+    gamma: float
+
+
+@dataclass(frozen=True, slots=True)
+class LimitsSpec:
+    workspace_lower_m: tuple[float, float, float]
+    workspace_upper_m: tuple[float, float, float]
+    linear_speed_limit_mps: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,14 +306,14 @@ class ConstraintSpec:
     object_name: str | None
     clearance_m: float
     value_m: float | None
-    lower_m: tuple[float, float, float] | None
-    upper_m: tuple[float, float, float] | None
 
 
 @dataclass(frozen=True, slots=True)
 class OptimizationSpec:
     version: int
     objective: ObjectiveSpec
+    safety: SafetySpec
+    limits: LimitsSpec
     constraints: tuple[ConstraintSpec, ...]
 
 
@@ -330,23 +394,85 @@ def parse_task_plan(
 
 
 def parse_optimization_spec(
-    payload: str | bytes | Mapping[str, Any], scene_objects: Sequence[SceneObject]
+    payload: str | bytes | Mapping[str, Any],
+    scene_objects: Sequence[SceneObject],
+    *,
+    current_position: Sequence[float],
+    required_avoid: Sequence[str] = (),
 ) -> OptimizationSpec:
     """Parse an untrusted Optimization Designer response without source eval."""
 
     data = _decode_json(payload, "optimization spec")
-    _exact_keys(data, {"version", "objective", "constraints"}, "optimization spec")
+    _exact_keys(
+        data,
+        {"version", "objective", "safety", "limits", "constraints"},
+        "optimization spec",
+    )
     if data["version"] != DSL_VERSION:
         raise ValueError("unsupported optimization-spec DSL version")
     known = {item.name for item in scene_objects}
     objective = _object(data["objective"], "objective")
-    _exact_keys(objective, {"kind", "target", "weight"}, "objective")
+    _exact_keys(
+        objective,
+        {"kind", "target", "q_weight", "linear_delta_u_weight"},
+        "objective",
+    )
     if objective["kind"] != "squared_position_error":
         raise ValueError("objective kind is not whitelisted")
-    weight = _finite_number(objective["weight"], "objective.weight")
-    if not 0.01 <= weight <= 100.0:
-        raise ValueError("objective.weight must be in [0.01, 100]")
+    q_weight = _finite_number(objective["q_weight"], "objective.q_weight")
+    if not Q_WEIGHT_MIN <= q_weight <= Q_WEIGHT_MAX:
+        raise ValueError(
+            f"objective.q_weight must be in [{Q_WEIGHT_MIN}, {Q_WEIGHT_MAX}]"
+        )
+    delta_u_weight = _enum_number(
+        objective["linear_delta_u_weight"],
+        DELTA_U_LEVELS,
+        "objective.linear_delta_u_weight",
+    )
     target = _parse_target(objective["target"], known, "objective.target")
+
+    safety = _object(data["safety"], "safety")
+    _exact_keys(safety, {"gamma"}, "safety")
+    gamma = _enum_number(safety["gamma"], GAMMA_LEVELS, "safety.gamma")
+
+    limits = _object(data["limits"], "limits")
+    _exact_keys(
+        limits,
+        {"workspace_lower_m", "workspace_upper_m", "linear_speed_limit_mps"},
+        "limits",
+    )
+    workspace_lower = _vector3(limits["workspace_lower_m"], "limits.workspace_lower_m")
+    workspace_upper = _vector3(limits["workspace_upper_m"], "limits.workspace_upper_m")
+    for axis, (lower, upper, hard_lower, hard_upper) in enumerate(
+        zip(
+            workspace_lower,
+            workspace_upper,
+            SAFE_PANDA_WORKSPACE_LOWER_M,
+            SAFE_PANDA_WORKSPACE_UPPER_M,
+        )
+    ):
+        if not hard_lower <= lower < upper <= hard_upper:
+            raise ValueError(
+                f"limits workspace axis {axis} must lie inside the Safe Panda envelope"
+            )
+    speed_limit = _finite_number(
+        limits["linear_speed_limit_mps"], "limits.linear_speed_limit_mps"
+    )
+    if not LINEAR_SPEED_MIN_MPS <= speed_limit <= LINEAR_SPEED_MAX_MPS:
+        raise ValueError(
+            "limits.linear_speed_limit_mps must be in "
+            f"[{LINEAR_SPEED_MIN_MPS}, {LINEAR_SPEED_MAX_MPS}]"
+        )
+
+    resolved_target = resolve_target(target, scene_objects, current_position)
+    if any(
+        coordinate < lower or coordinate > upper
+        for coordinate, lower, upper in zip(
+            resolved_target, workspace_lower, workspace_upper
+        )
+    ):
+        raise ValueError("objective target lies outside the selected workspace")
+
     raw_constraints = data["constraints"]
     if not isinstance(raw_constraints, list) or len(raw_constraints) > MAX_CONSTRAINTS:
         raise ValueError(f"constraints must be an array of at most {MAX_CONSTRAINTS}")
@@ -354,7 +480,7 @@ def parse_optimization_spec(
     for index, raw in enumerate(raw_constraints):
         label = f"constraints[{index}]"
         item = _object(raw, label)
-        required = {"kind", "object", "clearance_m", "value_m", "lower_m", "upper_m"}
+        required = {"kind", "object", "clearance_m", "value_m"}
         _exact_keys(item, required, label)
         kind = item["kind"]
         if kind not in CONSTRAINT_KINDS:
@@ -362,23 +488,37 @@ def parse_optimization_spec(
         object_name = None if item["object"] is None else _name(item["object"], f"{label}.object")
         clearance = _finite_number(item["clearance_m"], f"{label}.clearance_m")
         value_m = None if item["value_m"] is None else _finite_number(item["value_m"], f"{label}.value_m")
-        lower = None if item["lower_m"] is None else _vector3(item["lower_m"], f"{label}.lower_m")
-        upper = None if item["upper_m"] is None else _vector3(item["upper_m"], f"{label}.upper_m")
-        if not 0.0 <= clearance <= 0.5:
-            raise ValueError(f"{label}.clearance_m must be in [0, 0.5]")
         if kind == "collision_clearance":
-            if object_name not in known or value_m is not None or lower is not None or upper is not None:
+            if (
+                object_name not in known
+                or value_m is not None
+                or not CLEARANCE_MIN_M <= clearance <= CLEARANCE_MAX_M
+            ):
                 raise ValueError(f"{label} collision constraint fields are inconsistent")
-        elif kind in {"minimum_height", "maximum_height"}:
-            if object_name is not None or value_m is None or lower is not None or upper is not None or clearance != 0.0:
-                raise ValueError(f"{label} height constraint fields are inconsistent")
         else:
-            if object_name is not None or value_m is not None or lower is None or upper is None or clearance != 0.0:
-                raise ValueError(f"{label} workspace constraint fields are inconsistent")
-            if any(lo >= hi for lo, hi in zip(lower, upper)):
-                raise ValueError(f"{label} workspace lower bounds must be below upper bounds")
-        constraints.append(ConstraintSpec(kind, object_name, clearance, value_m, lower, upper))
-    return OptimizationSpec(DSL_VERSION, ObjectiveSpec(target, weight), tuple(constraints))
+            if object_name is not None or value_m is None or clearance != 0.0:
+                raise ValueError(f"{label} height constraint fields are inconsistent")
+            z_value = float(value_m)
+            if not workspace_lower[2] <= z_value <= workspace_upper[2]:
+                raise ValueError(f"{label}.value_m lies outside the selected workspace")
+        constraints.append(ConstraintSpec(kind, object_name, clearance, value_m))
+
+    collision_objects = {
+        constraint.object_name
+        for constraint in constraints
+        if constraint.kind == "collision_clearance"
+    }
+    if target.object_name in collision_objects:
+        raise ValueError("objective target cannot also be a collision obstacle")
+    if not set(required_avoid).issubset(collision_objects):
+        raise ValueError("optimization spec omits a required collision obstacle")
+    return OptimizationSpec(
+        DSL_VERSION,
+        ObjectiveSpec(target, q_weight, delta_u_weight),
+        SafetySpec(gamma),
+        LimitsSpec(workspace_lower, workspace_upper, speed_limit),
+        tuple(constraints),
+    )
 
 
 def optimization_from_task_step(
@@ -387,6 +527,7 @@ def optimization_from_task_step(
     *,
     objective_weight: float = 1.0,
     robot_radius: float = 0.012,
+    gamma: float = 0.05,
 ) -> OptimizationSpec:
     """Deterministic fail-closed OD fallback for a validated move step."""
 
@@ -394,14 +535,20 @@ def optimization_from_task_step(
         raise ValueError("only move steps have an optimization formulation")
     objects = {item.name: item for item in scene_objects}
     constraints = tuple(
-        ConstraintSpec(
-            "collision_clearance", name, robot_radius, None, None, None
-        )
+        ConstraintSpec("collision_clearance", name, robot_radius, None)
         for name in step.avoid
         if name in objects
     )
     return OptimizationSpec(
-        DSL_VERSION, ObjectiveSpec(step.target, objective_weight), constraints
+        DSL_VERSION,
+        ObjectiveSpec(step.target, objective_weight, 0.5),
+        SafetySpec(_enum_number(gamma, GAMMA_LEVELS, "gamma")),
+        LimitsSpec(
+            SAFE_PANDA_WORKSPACE_LOWER_M,
+            SAFE_PANDA_WORKSPACE_UPPER_M,
+            LINEAR_SPEED_MAX_MPS,
+        ),
+        constraints,
     )
 
 
@@ -442,6 +589,31 @@ class CompiledOptimization:
     target_position: tuple[float, float, float]
 
 
+def controller_config_from_optimization(
+    spec: OptimizationSpec,
+    scene_objects: Sequence[SceneObject],
+    current_position: Sequence[float],
+) -> Any:
+    """Translate a validated DSL spec to the fixed paper MPC configuration.
+
+    Dynamics, horizon, yaw weights, regularizers, jerk, and optimal decay stay
+    at :class:`PaperMPCConfig` defaults.  Only the A1-approved bounded fields
+    are transferred from the untrusted-language trust boundary.
+    """
+
+    from .controller import PaperMPCConfig
+
+    target = resolve_target(spec.objective.target, scene_objects, current_position)
+    return PaperMPCConfig(
+        target=(*target, 0.0, 0.0, 0.0, 0.0, 0.0),
+        q_weight=spec.objective.q_weight,
+        linear_delta_u_weight=spec.objective.linear_delta_u_weight,
+        position_lower=spec.limits.workspace_lower_m,
+        position_upper=spec.limits.workspace_upper_m,
+        linear_input_limit=spec.limits.linear_speed_limit_mps,
+    )
+
+
 def compile_optimization(
     spec: OptimizationSpec,
     scene_objects: Sequence[SceneObject],
@@ -453,7 +625,7 @@ def compile_optimization(
 
     target = resolve_target(spec.objective.target, scene_objects, current_position)
     target_dm = casadi.DM(target)
-    objective = spec.objective.weight * casadi.sumsqr(x[:3] - target_dm)
+    objective = spec.objective.q_weight * casadi.sumsqr(x[:3] - target_dm)
     objects = {item.name: item for item in scene_objects}
     inequalities: list[Any] = []
     for constraint in spec.constraints:
@@ -465,10 +637,6 @@ def compile_optimization(
             inequalities.append(constraint.value_m - x[2])
         elif constraint.kind == "maximum_height":
             inequalities.append(x[2] - constraint.value_m)
-        elif constraint.kind == "workspace_box":
-            for axis in range(3):
-                inequalities.append(constraint.lower_m[axis] - x[axis])
-                inequalities.append(x[axis] - constraint.upper_m[axis])
         else:  # impossible for parsed dataclasses; protects manual construction
             raise ValueError(f"unsupported constraint kind: {constraint.kind}")
     return CompiledOptimization(objective, tuple(inequalities), target)
@@ -609,6 +777,21 @@ class HuggingFaceSafeNarratePlanner:
                 TASK_PLAN_SCHEMA,
             )
             plan = parse_task_plan(tp_raw, scene_objects)
+            for index, step in enumerate(plan.steps):
+                if step.action != "move" or step.target is None:
+                    continue
+                resolved = resolve_target(step.target, scene_objects, current_position)
+                if any(
+                    value < lower or value > upper
+                    for value, lower, upper in zip(
+                        resolved,
+                        SAFE_PANDA_WORKSPACE_LOWER_M,
+                        SAFE_PANDA_WORKSPACE_UPPER_M,
+                    )
+                ):
+                    raise ValueError(
+                        f"task-plan target at step {index} lies outside the Safe Panda workspace"
+                    )
             tp_latency = perf_counter() - tp_started
         except Exception as error:
             raise LanguageDSLInferenceError(
@@ -642,7 +825,14 @@ class HuggingFaceSafeNarratePlanner:
                     client, OD_SYSTEM_PROMPT, od_payload, OPTIMIZATION_SPEC_SCHEMA
                 )
                 od_latency += perf_counter() - started
-                specs.append(parse_optimization_spec(raw, scene_objects))
+                specs.append(
+                    parse_optimization_spec(
+                        raw,
+                        scene_objects,
+                        current_position=current_position,
+                        required_avoid=step.avoid,
+                    )
+                )
             except Exception:
                 fallbacks += 1
                 specs.append(optimization_from_task_step(step, scene_objects))
