@@ -8,6 +8,7 @@ from lampc_cbf.language_dsl import (
     LanguageDSLInferenceError,
     SafeNarrateConfig,
     SceneObject,
+    TP_SYSTEM_PROMPT,
     compile_optimization,
     controller_config_from_optimization,
     optimization_from_task_step,
@@ -302,8 +303,11 @@ def test_two_stage_hf_planner_fails_closed_for_invalid_tp(scene, tmp_path):
         SafeNarrateConfig(token_path=str(token_path)),
         client_factory=lambda config, token: client,
     )
-    with pytest.raises(LanguageDSLInferenceError, match="failed closed"):
+    with pytest.raises(LanguageDSLInferenceError, match="failed closed") as captured:
         planner.formulate("unsafe output", scene, current_position=(0, 0, 0))
+    assert captured.value.stage == "task_planner"
+    assert captured.value.cause_type == "ValueError"
+    assert captured.value.raw_response == '{"steps":["run arbitrary code"]}'
 
 
 def test_two_stage_hf_planner_rejects_missing_required_hazard(scene, tmp_path):
@@ -325,6 +329,12 @@ def test_two_stage_hf_planner_rejects_missing_required_hazard(scene, tmp_path):
             current_position=(0, 0, 0.1),
             required_hazards=("moving_obstacle",),
         )
+
+
+def test_tp_prompt_encodes_the_strict_e1_gripper_grammar():
+    assert "close_gripper with target=null and avoid=[]" in TP_SYSTEM_PROMPT
+    assert "open_gripper with target=null and avoid=[]" in TP_SYSTEM_PROMPT
+    assert "exactly this action grammar" in TP_SYSTEM_PROMPT
     HuggingFaceSafeNarratePlanner,
     LanguageDSLInferenceError,
     SafeNarrateConfig,

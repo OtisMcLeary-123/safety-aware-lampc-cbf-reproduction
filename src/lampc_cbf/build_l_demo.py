@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from hashlib import sha256
 import json
 from pathlib import Path
 from time import perf_counter
@@ -160,6 +161,7 @@ def run_build_l_mpc_cbf_demo(
     from .demo import make_static_cbf_builder, paper_control_to_safe_panda_action
     from .dynamic_obstacle_demo import OnlineObstacleCBF
     from .language_dsl import (
+        LanguageDSLInferenceError,
         OptimizationSpec,
         SceneObject,
         controller_config_from_optimization,
@@ -513,12 +515,39 @@ def run_build_l_mpc_cbf_demo(
                 ),
             )
             current_ee = tuple(float(value) for value in env.robot.get_ee_position())
-            language_result = language_planner.formulate(
-                cfg.user_instruction,
-                language_scene,
-                current_position=current_ee,
-                required_hazards=("moving_obstacle",),
-            )
+            try:
+                language_result = language_planner.formulate(
+                    cfg.user_instruction,
+                    language_scene,
+                    current_position=current_ee,
+                    required_hazards=("moving_obstacle",),
+                )
+            except LanguageDSLInferenceError as error:
+                audit = {
+                    "status": "rejected_fail_closed",
+                    "stage": error.stage,
+                    "cause_type": error.cause_type,
+                    "message": str(error),
+                    "model": getattr(
+                        getattr(language_planner, "config", None),
+                        "model",
+                        "unknown",
+                    ),
+                    "provider": getattr(
+                        getattr(language_planner, "config", None),
+                        "provider",
+                        "unknown",
+                    ),
+                    "instruction_hash": sha256(
+                        cfg.user_instruction.strip().encode("utf-8")
+                    ).hexdigest(),
+                    "raw_response": error.raw_response,
+                    "robot_motion_started": False,
+                }
+                (output_dir / "language_failure_audit.json").write_text(
+                    json.dumps(audit, indent=2), encoding="utf-8"
+                )
+                raise
             trusted_macros = build_trusted_pick_place_macros(
                 language_result,
                 required_hazards=("moving_obstacle",),

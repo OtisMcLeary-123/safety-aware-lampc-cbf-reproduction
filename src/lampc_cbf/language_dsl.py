@@ -179,7 +179,18 @@ OPTIMIZATION_SPEC_SCHEMA: dict[str, Any] = {
 TP_SYSTEM_PROMPT = """You are the NARRATE Task Planner for a robot gripper.
 Return only SafeTaskPlan JSON matching the supplied schema. Use only scene
 object names. Every move must explicitly list avoided objects. Never emit
-Python, CasADi, prose, function calls, or fields outside the schema."""
+Python, CasADi, prose, function calls, or fields outside the schema.
+
+For each single pick-and-place operation, emit exactly this action grammar:
+1. move to the source object with relation=center;
+2. close_gripper with target=null and avoid=[];
+3. move to the destination object with relation=above or relation=center;
+4. open_gripper with target=null and avoid=[].
+
+The target field of every open_gripper or close_gripper action MUST be the JSON
+literal null, and its avoid field MUST be an empty JSON array. Do not attach an
+object name, position, hazard, or explanation to a gripper action. Repeat the
+same four-step grammar for additional pick-and-place operations."""
 
 OD_SYSTEM_PROMPT = """You are the NARRATE Optimization Designer. Convert one
 validated move step to SafeOptimizationSpec JSON. Select only bounded MPC
@@ -678,7 +689,20 @@ class SafeNarrateResult:
 
 
 class LanguageDSLInferenceError(RuntimeError):
-    """Raised when external TP inference cannot produce a safe plan."""
+    """Raised when external inference cannot cross a DSL trust boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str,
+        cause_type: str,
+        raw_response: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.cause_type = cause_type
+        self.raw_response = raw_response
 
 
 class HuggingFaceSafeNarratePlanner:
@@ -704,7 +728,9 @@ class HuggingFaceSafeNarratePlanner:
             from huggingface_hub import InferenceClient
         except ImportError as exc:
             raise LanguageDSLInferenceError(
-                "Install the LLM extra with: python -m pip install -e '.[llm]'"
+                "Install the LLM extra with: python -m pip install -e '.[llm]'",
+                stage="client_setup",
+                cause_type=type(exc).__name__,
             ) from exc
         return InferenceClient(
             provider=config.provider,
@@ -768,6 +794,7 @@ class HuggingFaceSafeNarratePlanner:
         # placed in environment variables or logs.
         from .hf_llm import load_hf_token
 
+        tp_raw: str | None = None
         try:
             client = self._client_factory(
                 self.config, load_hf_token(self.config.token_path)
@@ -808,7 +835,10 @@ class HuggingFaceSafeNarratePlanner:
             tp_latency = perf_counter() - tp_started
         except Exception as error:
             raise LanguageDSLInferenceError(
-                f"safe Task Planner inference failed closed: {type(error).__name__}"
+                f"safe Task Planner inference failed closed: {type(error).__name__}",
+                stage="task_planner",
+                cause_type=type(error).__name__,
+                raw_response=tp_raw,
             ) from error
 
         specs: list[OptimizationSpec | None] = []
