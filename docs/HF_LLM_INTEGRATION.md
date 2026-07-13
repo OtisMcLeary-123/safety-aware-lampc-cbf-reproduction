@@ -54,3 +54,31 @@ PYTHONPATH=src python scripts/run_hf_configured_mpc_cbf.py
 The next stage is online feedback: pass the current gamma with the user's new
 instruction, validate the decision, then call `ReferenceObstacleTVP.update_gamma`
 at a control-cycle boundary without rebuilding the MPC model.
+
+## N2-A1 blinded alignment smoke test
+
+The paper's Table 1 publishes only eight of the 50 alignment queries. The full
+query set and the five human ratings per query are unavailable. The reproduction
+therefore treats the eight published query/gamma pairs as an OF regression smoke
+test, not as a reproduction of the paper's human-alignment claim.
+
+The smoke evaluator is intentionally isolated from the controller mapper:
+
+- it accepts the paper's theoretical domain `0 < gamma <= 1`;
+- its prompt contains no Table 1 target examples or Table 2 label thresholds;
+- it derives labels locally using the exact Table 2 intervals;
+- it reports label correlations plus continuous-gamma diagnostics; and
+- its output cannot enter the MPC controller, whose validated domain remains
+  `0 < gamma <= 0.15`.
+
+After explicit approval to send the eight published instructions to the selected
+Hugging Face provider, run:
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python scripts/run_language_alignment_smoke.py
+```
+
+Even a perfect result here only demonstrates agreement with eight published OF
+examples. Reproducing Table 3 still requires a preregistered 50-query dataset and
+five independent human ratings for every query.
