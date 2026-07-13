@@ -40,6 +40,7 @@ class SmoothDynamicConfig:
     safety_reflex_enabled: bool = True
     reflex_lookahead_steps: int = 8
     reflex_alpha: float = 4.0
+    avoidance_onset_threshold: float = 0.005
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
     safety_mode: str = "cbf"
@@ -72,6 +73,8 @@ class SmoothDynamicConfig:
             raise ValueError("velocity_filter must be in [0, 1]")
         if self.reflex_lookahead_steps < 1 or self.reflex_alpha <= 0.0:
             raise ValueError("reflex lookahead and alpha must be positive")
+        if self.avoidance_onset_threshold <= 0.0:
+            raise ValueError("avoidance_onset_threshold must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
             raise ValueError("safety_mode must be cbf, distance, or none")
         previous_time = -1.0
@@ -101,6 +104,8 @@ class SmoothDynamicResult:
     reflex_backups: int
     mean_optimal_decay: float
     minimum_optimal_decay: float
+    avoidance_onset_time: float | None
+    minimum_predicted_ttc: float | None
     smoothness: SmoothnessMetrics
     output_dir: str
 
@@ -356,6 +361,7 @@ def run_smooth_dynamic_demo(
     measured_clearances: list[float] = []
     goal_distances: list[float] = []
     solve_times: list[float] = []
+    predicted_ttc_values: list[float] = []
     sensor_update_steps: list[int] = [0]
 
     try:
@@ -460,6 +466,7 @@ def run_smooth_dynamic_demo(
         gamma_trace: list[float] = []
         reflex_audits: list[dict[str, Any]] = []
         optimal_decay_trace: list[float] = []
+        avoidance_onset_time: float | None = None
 
         for step_index in range(cfg.max_steps):
             elapsed = step_index * mpc_config.dt
@@ -584,6 +591,21 @@ def run_smooth_dynamic_demo(
                 np.linalg.norm(position - measurement) - combined_radius
             )
             goal_distance = float(np.linalg.norm(position - goal))
+            if (
+                avoidance_onset_time is None
+                and abs(float(position[0] - start[0])) >= cfg.avoidance_onset_threshold
+            ):
+                avoidance_onset_time = (step_index + 1) * mpc_config.dt
+            relative_position = position - true_obstacle
+            relative_velocity = candidate[:3] - obstacle_velocity
+            ttc_a = float(np.dot(relative_velocity, relative_velocity))
+            ttc_b = float(2.0 * np.dot(relative_position, relative_velocity))
+            ttc_c = float(np.dot(relative_position, relative_position) - combined_radius**2)
+            discriminant = ttc_b * ttc_b - 4.0 * ttc_a * ttc_c
+            if ttc_a > 1e-12 and discriminant >= 0.0:
+                root = (-ttc_b - float(np.sqrt(discriminant))) / (2.0 * ttc_a)
+                if root >= 0.0:
+                    predicted_ttc_values.append(root)
             positions.append(position.copy())
             true_obstacles.append(true_obstacle.copy())
             measured_obstacles.append(measurement.copy())
@@ -675,6 +697,10 @@ def run_smooth_dynamic_demo(
             reflex_backups=sum(int(item["backup_used"]) for item in reflex_audits),
             mean_optimal_decay=float(np.mean(optimal_decay_trace)),
             minimum_optimal_decay=float(np.min(optimal_decay_trace)),
+            avoidance_onset_time=avoidance_onset_time,
+            minimum_predicted_ttc=(
+                float(min(predicted_ttc_values)) if predicted_ttc_values else None
+            ),
             smoothness=smoothness,
             output_dir=str(output_dir),
         )
@@ -707,6 +733,7 @@ def run_smooth_dynamic_demo(
             "true_clearances": true_clearances,
             "measured_clearances": measured_clearances,
             "goal_distances": goal_distances,
+            "predicted_ttc_values": predicted_ttc_values,
             "solve_times": solve_times,
         }
         if cfg.save_metrics:
