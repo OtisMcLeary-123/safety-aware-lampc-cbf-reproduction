@@ -90,6 +90,13 @@ levels locally, and fails closed to `gamma=0.05`. The token remains in the
 ignored `hftoken.txt` file and the LLM is never called inside the 40 ms control
 loop. See [docs/HF_LLM_INTEGRATION.md](docs/HF_LLM_INTEGRATION.md).
 
+The controller-isolated N2-A1 alignment smoke test compares a blinded hosted
+model with the eight OF examples published in the paper. The completed NVIDIA
+NIM GLM-5.2 run recovered the continuous ordering (`Spearman=0.897`) but only
+matched 2/8 Table-2 labels, demonstrating a large calibration gap. This is not
+the unpublished 50-query human study. See
+[docs/LANGUAGE_ALIGNMENT_N2A1.md](docs/LANGUAGE_ALIGNMENT_N2A1.md).
+
 ## Run the paper-style hard scene
 
 ```bash

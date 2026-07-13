@@ -160,6 +160,8 @@ class NvidiaNIMAlignmentConfig:
     token_path: str = "nvidiatoken.txt"
     timeout_seconds: float = 30.0
     temperature: float = 0.0
+    top_p: float | None = None
+    top_k: int | None = None
     seed: int = 11
     max_tokens: int = 64
     enable_thinking: bool = False
@@ -173,6 +175,10 @@ class NvidiaNIMAlignmentConfig:
             raise ValueError("timeout_seconds must be positive")
         if not 0.0 <= self.temperature <= 1.0:
             raise ValueError("NVIDIA NIM temperature must be in [0, 1]")
+        if self.top_p is not None and not 0.0 < self.top_p <= 1.0:
+            raise ValueError("NVIDIA NIM top_p must be in (0, 1]")
+        if self.top_k is not None and self.top_k < 1:
+            raise ValueError("NVIDIA NIM top_k must be positive")
         if self.max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
 
@@ -197,6 +203,27 @@ class AlignmentPrediction:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self) | {"safety_label": self.safety_label}
+
+
+def alignment_prediction_from_dict(payload: dict[str, Any]) -> AlignmentPrediction:
+    """Rebuild a validated prediction from an audited checkpoint row."""
+
+    required = {
+        "gamma",
+        "model",
+        "provider",
+        "latency_seconds",
+        "requested_at_unix",
+        "prompt_hash",
+        "request_hash",
+        "raw_response",
+    }
+    missing = required - set(payload)
+    if missing:
+        raise ValueError(
+            f"checkpoint prediction is missing fields: {sorted(missing)}"
+        )
+    return AlignmentPrediction(**{key: payload[key] for key in required})
 
 
 class BlindAlignmentMapper:
@@ -329,6 +356,10 @@ class NvidiaNIMBlindAlignmentMapper:
                 "enable_thinking": self.config.enable_thinking
             },
         }
+        if self.config.top_p is not None:
+            payload["top_p"] = self.config.top_p
+        if self.config.top_k is not None:
+            payload["top_k"] = self.config.top_k
         request_hash = sha256(
             json.dumps(
                 {
@@ -353,9 +384,20 @@ class NvidiaNIMBlindAlignmentMapper:
             self.config.timeout_seconds,
         )
         try:
-            raw_response = response["choices"][0]["message"]["content"]
+            choice = response["choices"][0]
+            message = choice["message"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError("NVIDIA NIM response has no assistant content") from exc
+            raise ValueError("NVIDIA NIM response has no assistant message") from exc
+        if not isinstance(message, dict):
+            raise ValueError("NVIDIA NIM assistant message must be an object")
+        if "content" not in message:
+            fields = ",".join(sorted(str(field) for field in message))
+            finish_reason = choice.get("finish_reason", "missing")
+            raise ValueError(
+                "NVIDIA NIM response has no assistant content; "
+                f"message_fields={fields}; finish_reason={finish_reason}"
+            )
+        raw_response = message["content"]
         if not isinstance(raw_response, str):
             raise ValueError("NVIDIA NIM assistant content must be text")
         parsed = json.loads(raw_response)

@@ -83,7 +83,7 @@ Even a perfect result here only demonstrates agreement with eight published OF
 examples. Reproducing Table 3 still requires a preregistered 50-query dataset and
 five independent human ratings for every query.
 
-### NVIDIA NIM-Q1 fallback provider
+### NVIDIA NIM fallback providers
 
 When Hugging Face routed credits are unavailable, the approved R2 alternative is
 the NVIDIA NIM free development endpoint with
@@ -109,3 +109,18 @@ Table 1 queries and run:
 ```bash
 PYTHONPATH=src python scripts/run_nvidia_nim_alignment_smoke.py
 ```
+
+Observed provider outcome on 2026-07-14: the Qwen formatter probes passed, but
+benchmark attempts encountered a timeout, HTTP 500 responses, and a response
+containing `reasoning_content` without final `content`. Those pilot responses are
+not part of the reported metrics. The completed fallback run used
+`z-ai/glm-5.2` on the same NVIDIA endpoint, with the same blind prompt,
+`temperature=0`, `seed=11`, thinking disabled, and strict local validation:
+
+```bash
+PYTHONPATH=src python scripts/run_nvidia_nim_alignment_smoke.py \
+  --model z-ai/glm-5.2 --timeout-seconds 120 --max-tokens 512 \
+  --output-dir artifacts/language_alignment_smoke_nvidia_nim_glm52
+```
+
+See `LANGUAGE_ALIGNMENT_N2A1.md` for the claim-bounded validation report.

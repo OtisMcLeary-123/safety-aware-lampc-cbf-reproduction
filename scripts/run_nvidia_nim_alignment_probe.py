@@ -25,6 +25,14 @@ def main() -> int:
     parser.add_argument("--model", default=defaults.model)
     parser.add_argument("--token-file", default=defaults.token_path)
     parser.add_argument(
+        "--timeout-seconds", type=float, default=defaults.timeout_seconds
+    )
+    parser.add_argument("--temperature", type=float, default=defaults.temperature)
+    parser.add_argument("--top-p", type=float, default=defaults.top_p)
+    parser.add_argument("--top-k", type=int, default=defaults.top_k)
+    parser.add_argument("--max-tokens", type=int, default=defaults.max_tokens)
+    parser.add_argument("--enable-thinking", action="store_true")
+    parser.add_argument(
         "--output-dir", default="artifacts/language_alignment_nim_probe"
     )
     args = parser.parse_args()
@@ -32,17 +40,28 @@ def main() -> int:
         defaults,
         model=args.model,
         token_path=args.token_file,
+        timeout_seconds=args.timeout_seconds,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        max_tokens=args.max_tokens,
+        enable_thinking=args.enable_thinking,
     )
     prediction = NvidiaNIMBlindAlignmentMapper(config).predict(PROBE_INSTRUCTION)
     payload = {
         "protocol": {
-            "name": "NIM-Q1 non-benchmark compatibility probe",
+            "name": "NVIDIA NIM non-benchmark compatibility probe",
             "model": config.model,
             "provider": "nvidia-nim",
             "endpoint": config.endpoint,
             "benchmark_query_used": False,
             "expected_gamma": 0.5,
             "thinking_enabled": config.enable_thinking,
+            "timeout_seconds": config.timeout_seconds,
+            "temperature": config.temperature,
+            "top_p": config.top_p,
+            "top_k": config.top_k,
+            "max_tokens": config.max_tokens,
             "token_recorded": False,
         },
         "passed": prediction.gamma == 0.5,

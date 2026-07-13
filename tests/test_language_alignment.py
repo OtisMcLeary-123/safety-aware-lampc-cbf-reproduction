@@ -18,6 +18,7 @@ from lampc_cbf.language_alignment import (
     NvidiaNIMAlignmentConfig,
     NvidiaNIMBlindAlignmentMapper,
     PUBLISHED_ALIGNMENT_CASES,
+    alignment_prediction_from_dict,
     evaluate_published_smoke,
     kendall_tau_b,
     paper_safety_label,
@@ -162,6 +163,36 @@ def test_nvidia_nim_mapper_rejects_non_json_without_fallback(tmp_path: Path) -> 
         mapper.predict("Use ordinary caution.")
 
 
+def test_nvidia_nim_mapper_forwards_vendor_sampling_profile(tmp_path: Path) -> None:
+    token_path = tmp_path / "nvidia-token.txt"
+    token_path.write_text("nvapi_test", encoding="utf-8")
+    captured = {}
+
+    def transport(url, headers, payload, timeout):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": '{"gamma": 0.5}'}}]}
+
+    mapper = NvidiaNIMBlindAlignmentMapper(
+        NvidiaNIMAlignmentConfig(
+            token_path=str(token_path),
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+            max_tokens=4096,
+            enable_thinking=True,
+        ),
+        transport=transport,
+    )
+
+    mapper.predict("Use ordinary caution.")
+
+    assert captured["temperature"] == 0.6
+    assert captured["top_p"] == 0.95
+    assert captured["top_k"] == 20
+    assert captured["max_tokens"] == 4096
+    assert captured["chat_template_kwargs"] == {"enable_thinking": True}
+
+
 def test_nvidia_nim_mapper_rejects_extra_keys(tmp_path: Path) -> None:
     token_path = tmp_path / "nvidia-token.txt"
     token_path.write_text("nvapi_test", encoding="utf-8")
@@ -175,6 +206,30 @@ def test_nvidia_nim_mapper_rejects_extra_keys(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="contain only gamma"):
+        mapper.predict("Use ordinary caution.")
+
+
+def test_nvidia_nim_missing_content_reports_safe_shape(tmp_path: Path) -> None:
+    token_path = tmp_path / "nvidia-token.txt"
+    token_path.write_text("nvapi_test", encoding="utf-8")
+    mapper = NvidiaNIMBlindAlignmentMapper(
+        NvidiaNIMAlignmentConfig(token_path=str(token_path)),
+        transport=lambda *args: {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "reasoning_content": "hidden"},
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "message_fields=reasoning_content,role; finish_reason=length"
+        ),
+    ):
         mapper.predict("Use ordinary caution.")
 
 
@@ -212,6 +267,14 @@ def test_perfect_published_smoke_scores_one() -> None:
         "exact_label_accuracy": 1,
     }
     assert metrics["continuous_gamma_diagnostics"]["mean_absolute_error"] == 0
+
+
+def test_checkpoint_prediction_round_trip_ignores_derived_label() -> None:
+    original = _prediction(0.09)
+
+    restored = alignment_prediction_from_dict(original.as_dict())
+
+    assert restored == original
 
 
 def test_dependency_free_correlations_handle_ties() -> None:
