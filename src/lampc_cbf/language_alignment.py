@@ -11,10 +11,10 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
 from math import isclose, isfinite, sqrt
-from pathlib import Path
 from statistics import mean
 from time import perf_counter, time
 from typing import Any, Callable, Sequence
+from urllib.request import Request, urlopen
 
 from .hf_llm import DEFAULT_HF_MODEL, DEFAULT_HF_PROVIDER, load_hf_token
 
@@ -49,6 +49,13 @@ ALIGNMENT_GAMMA_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+NVIDIA_NIM_MODEL = "qwen/qwen3.5-397b-a17b"
+NVIDIA_NIM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions"
+NVIDIA_NIM_OUTPUT_CONTRACT = (
+    'Output contract: return exactly one JSON object shaped as {"gamma": number}. '
+    "Do not include markdown, analysis, reasoning tags, or additional keys."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +152,32 @@ class AlignmentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class NvidiaNIMAlignmentConfig:
+    """Configuration for the controller-isolated NVIDIA NIM evaluator."""
+
+    model: str = NVIDIA_NIM_MODEL
+    endpoint: str = NVIDIA_NIM_ENDPOINT
+    token_path: str = "nvidiatoken.txt"
+    timeout_seconds: float = 30.0
+    temperature: float = 0.0
+    seed: int = 11
+    max_tokens: int = 64
+    enable_thinking: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.model:
+            raise ValueError("model must be non-empty")
+        if not self.endpoint.startswith("https://"):
+            raise ValueError("NVIDIA NIM endpoint must use HTTPS")
+        if self.timeout_seconds <= 0.0:
+            raise ValueError("timeout_seconds must be positive")
+        if not 0.0 <= self.temperature <= 1.0:
+            raise ValueError("NVIDIA NIM temperature must be in [0, 1]")
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class AlignmentPrediction:
     gamma: float
     model: str
@@ -236,6 +269,109 @@ class BlindAlignmentMapper:
             prompt_hash=sha256(
                 BLIND_ALIGNMENT_SYSTEM_PROMPT.encode("utf-8")
             ).hexdigest(),
+            request_hash=request_hash,
+            raw_response=raw_response,
+        )
+
+
+def _post_json(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    request = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+class NvidiaNIMBlindAlignmentMapper:
+    """Call the NIM-Q1 hosted endpoint with strict local output validation."""
+
+    def __init__(
+        self,
+        config: NvidiaNIMAlignmentConfig | None = None,
+        *,
+        transport: Callable[
+            [str, dict[str, str], dict[str, Any], float], dict[str, Any]
+        ]
+        | None = None,
+    ) -> None:
+        self.config = config or NvidiaNIMAlignmentConfig()
+        self._transport = transport or _post_json
+
+    def predict(self, instruction: str) -> AlignmentPrediction:
+        if not instruction.strip():
+            raise ValueError("instruction must be non-empty")
+        messages = [
+            {"role": "system", "content": BLIND_ALIGNMENT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"{NVIDIA_NIM_OUTPUT_CONTRACT}\n"
+                    f"Robot-motion instruction: {instruction.strip()}"
+                ),
+            },
+        ]
+        payload = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+            "seed": self.config.seed,
+            "stream": False,
+            "chat_template_kwargs": {
+                "enable_thinking": self.config.enable_thinking
+            },
+        }
+        request_hash = sha256(
+            json.dumps(
+                {
+                    "endpoint": self.config.endpoint,
+                    "payload": payload,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        requested_at = time()
+        started = perf_counter()
+        token = load_hf_token(self.config.token_path)
+        response = self._transport(
+            self.config.endpoint,
+            {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            payload,
+            self.config.timeout_seconds,
+        )
+        try:
+            raw_response = response["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError("NVIDIA NIM response has no assistant content") from exc
+        if not isinstance(raw_response, str):
+            raise ValueError("NVIDIA NIM assistant content must be text")
+        parsed = json.loads(raw_response)
+        if not isinstance(parsed, dict) or set(parsed) != {"gamma"}:
+            raise ValueError("alignment response must contain only gamma")
+        gamma = validate_alignment_gamma(parsed["gamma"])
+        prompt_material = (
+            f"{BLIND_ALIGNMENT_SYSTEM_PROMPT}\n{NVIDIA_NIM_OUTPUT_CONTRACT}"
+        )
+        return AlignmentPrediction(
+            gamma=gamma,
+            model=self.config.model,
+            provider="nvidia-nim",
+            latency_seconds=perf_counter() - started,
+            requested_at_unix=requested_at,
+            prompt_hash=sha256(prompt_material.encode("utf-8")).hexdigest(),
             request_hash=request_hash,
             raw_response=raw_response,
         )

@@ -82,3 +82,30 @@ PYTHONPATH=src python scripts/run_language_alignment_smoke.py
 Even a perfect result here only demonstrates agreement with eight published OF
 examples. Reproducing Table 3 still requires a preregistered 50-query dataset and
 five independent human ratings for every query.
+
+### NVIDIA NIM-Q1 fallback provider
+
+When Hugging Face routed credits are unavailable, the approved R2 alternative is
+the NVIDIA NIM free development endpoint with
+`qwen/qwen3.5-397b-a17b`. This changes the evaluated model and provider, so its
+results must be reported separately from the original Hugging Face configuration.
+
+The model-specific hosted API documents seed control and disabling thinking mode,
+but not server-side JSON Schema. The adapter therefore requests exactly one JSON
+object in the blind prompt and rejects malformed, out-of-domain, or extra-key
+responses locally. It never substitutes a fallback prediction.
+
+Store the NVIDIA API key only in the ignored `nvidiatoken.txt` file with mode
+`600`. After explicit external-upload approval, run the non-benchmark formatter
+probe first:
+
+```bash
+PYTHONPATH=src python scripts/run_nvidia_nim_alignment_probe.py
+```
+
+Only after that probe passes, request separate approval to submit the eight public
+Table 1 queries and run:
+
+```bash
+PYTHONPATH=src python scripts/run_nvidia_nim_alignment_smoke.py
+```

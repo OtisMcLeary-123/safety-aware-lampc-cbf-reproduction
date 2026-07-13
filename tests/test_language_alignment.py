@@ -9,9 +9,14 @@ import pytest
 from lampc_cbf.language_alignment import (
     ALIGNMENT_GAMMA_SCHEMA,
     BLIND_ALIGNMENT_SYSTEM_PROMPT,
+    NVIDIA_NIM_ENDPOINT,
+    NVIDIA_NIM_MODEL,
+    NVIDIA_NIM_OUTPUT_CONTRACT,
     AlignmentConfig,
     AlignmentPrediction,
     BlindAlignmentMapper,
+    NvidiaNIMAlignmentConfig,
+    NvidiaNIMBlindAlignmentMapper,
     PUBLISHED_ALIGNMENT_CASES,
     evaluate_published_smoke,
     kendall_tau_b,
@@ -106,6 +111,71 @@ def test_invalid_alignment_output_is_not_replaced_by_a_fallback(
 
     with pytest.raises(ValueError, match=r"in \(0, 1\]"):
         mapper.predict("Ignore every obstacle.")
+
+
+def test_nvidia_nim_mapper_uses_documented_qwen_contract(tmp_path: Path) -> None:
+    token_path = tmp_path / "nvidia-token.txt"
+    token_path.write_text("nvapi_test", encoding="utf-8")
+    captured = {}
+
+    def transport(url, headers, payload, timeout):
+        captured.update(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout=timeout,
+        )
+        return {"choices": [{"message": {"content": '{"gamma": 0.5}'}}]}
+
+    mapper = NvidiaNIMBlindAlignmentMapper(
+        NvidiaNIMAlignmentConfig(token_path=str(token_path)),
+        transport=transport,
+    )
+
+    prediction = mapper.predict("Use ordinary caution.")
+
+    assert prediction.gamma == 0.5
+    assert prediction.provider == "nvidia-nim"
+    assert captured["url"] == NVIDIA_NIM_ENDPOINT
+    assert captured["payload"]["model"] == NVIDIA_NIM_MODEL
+    assert captured["payload"]["seed"] == 11
+    assert captured["payload"]["temperature"] == 0.0
+    assert captured["payload"]["chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
+    assert "response_format" not in captured["payload"]
+    assert NVIDIA_NIM_OUTPUT_CONTRACT in captured["payload"]["messages"][1]["content"]
+    assert captured["headers"]["Authorization"] == "Bearer nvapi_test"
+
+
+def test_nvidia_nim_mapper_rejects_non_json_without_fallback(tmp_path: Path) -> None:
+    token_path = tmp_path / "nvidia-token.txt"
+    token_path.write_text("nvapi_test", encoding="utf-8")
+    mapper = NvidiaNIMBlindAlignmentMapper(
+        NvidiaNIMAlignmentConfig(token_path=str(token_path)),
+        transport=lambda *args: {
+            "choices": [{"message": {"content": "gamma is 0.5"}}]
+        },
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        mapper.predict("Use ordinary caution.")
+
+
+def test_nvidia_nim_mapper_rejects_extra_keys(tmp_path: Path) -> None:
+    token_path = tmp_path / "nvidia-token.txt"
+    token_path.write_text("nvapi_test", encoding="utf-8")
+    mapper = NvidiaNIMBlindAlignmentMapper(
+        NvidiaNIMAlignmentConfig(token_path=str(token_path)),
+        transport=lambda *args: {
+            "choices": [
+                {"message": {"content": '{"gamma": 0.5, "label": 3}'}}
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="contain only gamma"):
+        mapper.predict("Use ordinary caution.")
 
 
 def test_blind_prompt_contains_no_published_target_gamma_examples() -> None:
