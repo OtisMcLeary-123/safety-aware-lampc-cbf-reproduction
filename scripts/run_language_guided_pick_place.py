@@ -7,7 +7,7 @@ from dataclasses import asdict
 import json
 
 from lampc_cbf.build_l_demo import BuildLDemoConfig, run_build_l_mpc_cbf_demo
-from lampc_cbf.hf_llm import HuggingFaceGammaMapper
+from lampc_cbf.language_dsl import HuggingFaceSafeNarratePlanner
 
 
 USER_INSTRUCTION = (
@@ -17,10 +17,9 @@ USER_INSTRUCTION = (
 
 
 def main() -> int:
-    decision = HuggingFaceGammaMapper().infer_gamma(USER_INSTRUCTION)
+    planner = HuggingFaceSafeNarratePlanner()
     result = run_build_l_mpc_cbf_demo(
         BuildLDemoConfig(
-            gamma=decision.gamma,
             seed=7,
             max_move_steps=160,
             cube_indices=(0,),
@@ -30,19 +29,13 @@ def main() -> int:
             obstacle_velocity=(0.0, -0.01, 0.0),
             render_stride=2,
             user_instruction=USER_INSTRUCTION,
-            llm_model=decision.model,
-            llm_safety_level=decision.safety_level,
-            llm_latency_seconds=decision.latency_seconds,
-            llm_fallback_used=decision.fallback_used,
             output_dir="artifacts/language_guided_pick_place",
-        )
+        ),
+        language_planner=planner,
     )
-    payload = {
-        "llm_decision": decision.as_dict(),
-        "result": asdict(result),
-    }
+    payload = {"result": asdict(result)}
     print(json.dumps(payload, indent=2))
-    return 0 if result.success and not decision.fallback_used else 2
+    return 0 if result.success and result.language_od_fallbacks == 0 else 2
 
 
 if __name__ == "__main__":

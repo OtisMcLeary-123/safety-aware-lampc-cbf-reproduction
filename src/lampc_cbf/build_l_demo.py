@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
 from time import perf_counter
@@ -81,6 +81,12 @@ class BuildLDemoResult:
     mean_solve_time: float
     max_solve_time: float
     output_dir: str
+    language_plan_used: bool = False
+    language_model: str = "not-used"
+    language_tp_latency_seconds: float = 0.0
+    language_od_latency_seconds: float = 0.0
+    language_od_fallbacks: int = 0
+    language_gammas: tuple[float, ...] = ()
 
 
 def _project_world_points(
@@ -131,6 +137,8 @@ def _project_world_points(
 
 def run_build_l_mpc_cbf_demo(
     config: BuildLDemoConfig | None = None,
+    *,
+    language_planner: Any | None = None,
 ) -> BuildLDemoResult:
     """Move all four cubes to the L targets using MPC-CBF motion phases.
 
@@ -151,8 +159,20 @@ def run_build_l_mpc_cbf_demo(
     from .controller import PaperMPCConfig, build_mpc_controller
     from .demo import make_static_cbf_builder, paper_control_to_safe_panda_action
     from .dynamic_obstacle_demo import OnlineObstacleCBF
+    from .language_dsl import (
+        OptimizationSpec,
+        SceneObject,
+        controller_config_from_optimization,
+    )
+    from .trusted_executor import build_trusted_pick_place_macros
 
     cfg = config or BuildLDemoConfig()
+    if language_planner is not None and (
+        not cfg.place_blue_on_red or cfg.cube_indices != (0,) or not cfg.dynamic_obstacle
+    ):
+        raise ValueError(
+            "trusted language execution requires blue-on-red mode with one dynamic obstacle"
+        )
     np.random.seed(cfg.seed)
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -187,6 +207,9 @@ def run_build_l_mpc_cbf_demo(
     next_sensor_time = cfg.sensor_period
     obstacle_velocity = np.asarray(cfg.obstacle_velocity, dtype=float)
     simulation_dt = PaperMPCConfig().dt
+    language_result: Any | None = None
+    trusted_macros: tuple[Any, ...] = ()
+    language_scene: tuple[Any, ...] = ()
 
     def body_positions() -> list[Any]:
         return [
@@ -261,6 +284,7 @@ def run_build_l_mpc_cbf_demo(
         label: str,
         tolerance: float | None = None,
         dynamic_cbf: bool = True,
+        optimization_spec: OptimizationSpec | None = None,
     ) -> bool:
         nonlocal total_steps, active_stage
         active_stage = label
@@ -268,9 +292,33 @@ def run_build_l_mpc_cbf_demo(
         initial_position = np.asarray(env.robot.get_ee_position(), dtype=float)
         previous_control = np.zeros(4)
         initial_state = np.concatenate([initial_position, [0.0], previous_control])
-        mpc_config = PaperMPCConfig(
-            target=(*target, 0.0, 0.0, 0.0, 0.0, 0.0)
-        )
+        if optimization_spec is None:
+            mpc_config = PaperMPCConfig(
+                target=(*target, 0.0, 0.0, 0.0, 0.0, 0.0)
+            )
+            active_gamma = cfg.gamma
+            dynamic_clearance = cfg.gripper_collision_radius
+        else:
+            mpc_config = replace(
+                controller_config_from_optimization(
+                    optimization_spec,
+                    language_scene,
+                    current_position=initial_position,
+                ),
+                target=(*target, 0.0, 0.0, 0.0, 0.0, 0.0),
+            )
+            active_gamma = optimization_spec.safety.gamma
+            dynamic_constraints = [
+                constraint
+                for constraint in optimization_spec.constraints
+                if constraint.kind == "collision_clearance"
+                and constraint.object_name == "moving_obstacle"
+            ]
+            if len(dynamic_constraints) != 1:
+                raise RuntimeError(
+                    f"validated OD spec for {label} must contain one dynamic obstacle constraint"
+                )
+            dynamic_clearance = dynamic_constraints[0].clearance_m
         constraint_builders: tuple[Any, ...] = ()
         if obstacles:
             constraint_builders = (
@@ -278,10 +326,28 @@ def run_build_l_mpc_cbf_demo(
                     obstacles,
                     obstacle_radius=cfg.cube_radius,
                     collision_radius=cfg.gripper_collision_radius,
-                    gamma=cfg.gamma,
+                    gamma=active_gamma,
                     dt=mpc_config.dt,
                 ),
             )
+        if optimization_spec is not None:
+            def add_language_height_constraints(model, mpc, x, u, ca):
+                del model, u, ca
+                for index, constraint in enumerate(optimization_spec.constraints):
+                    if constraint.kind == "minimum_height":
+                        mpc.set_nl_cons(
+                            f"dsl_minimum_height_{index}",
+                            constraint.value_m - x[2],
+                            ub=0.0,
+                        )
+                    elif constraint.kind == "maximum_height":
+                        mpc.set_nl_cons(
+                            f"dsl_maximum_height_{index}",
+                            x[2] - constraint.value_m,
+                            ub=0.0,
+                        )
+
+            constraint_builders += (add_language_height_constraints,)
         model_builders: tuple[Any, ...] = ()
         online_cbf = None
         if (
@@ -292,8 +358,8 @@ def run_build_l_mpc_cbf_demo(
             online_cbf = OnlineObstacleCBF(
                 measured_obstacle,
                 obstacle_radius=cfg.obstacle_radius,
-                collision_radius=cfg.gripper_collision_radius,
-                gamma=cfg.gamma,
+                collision_radius=dynamic_clearance,
+                gamma=active_gamma,
                 dt=mpc_config.dt,
                 horizon=mpc_config.horizon,
             )
@@ -433,6 +499,42 @@ def run_build_l_mpc_cbf_demo(
                 rgba_color=np.array([0.95, 0.95, 0.95, 1.0]),
                 specular_color=np.array([0.5, 0.5, 0.5]),
             )
+        if language_planner is not None:
+            aliases = ("blue_cube", "green_cube", "orange_cube", "red_cube")
+            current_objects = body_positions()
+            language_scene = tuple(
+                SceneObject(alias, tuple(float(value) for value in position), cfg.cube_radius)
+                for alias, position in zip(aliases, current_objects)
+            ) + (
+                SceneObject(
+                    "moving_obstacle",
+                    tuple(float(value) for value in true_obstacle),
+                    cfg.obstacle_radius,
+                ),
+            )
+            current_ee = tuple(float(value) for value in env.robot.get_ee_position())
+            language_result = language_planner.formulate(
+                cfg.user_instruction,
+                language_scene,
+                current_position=current_ee,
+                required_hazards=("moving_obstacle",),
+            )
+            trusted_macros = build_trusted_pick_place_macros(
+                language_result,
+                required_hazards=("moving_obstacle",),
+            )
+            if len(trusted_macros) != 1:
+                raise RuntimeError(
+                    "blue-on-red trusted runtime currently requires exactly one pick/place macro"
+                )
+            macro = trusted_macros[0]
+            if (
+                macro.source.object_name != "blue_cube"
+                or macro.destination.object_name != "red_cube"
+            ):
+                raise RuntimeError(
+                    "blue-on-red trusted runtime rejected a mismatched source or destination"
+                )
         record_frame()
         all_stages_reached = True
 
@@ -448,18 +550,36 @@ def run_build_l_mpc_cbf_demo(
             grasp_position = object_position + np.array([0.0, 0.0, cfg.grasp_offset])
             above_target = target_position + np.array([0.0, 0.0, cfg.hover_height])
             place_position = target_position + np.array([0.0, 0.0, cfg.place_offset])
+            pick_spec = (
+                trusted_macros[0].pick_optimization if trusted_macros else None
+            )
+            place_spec = (
+                trusted_macros[0].place_optimization if trusted_macros else None
+            )
 
             apply_gripper(1.0, cfg.open_steps, f"cube_{cube_index + 1}_open")
             all_stages_reached &= move_to(
-                above_object, other_objects, 1.0, f"cube_{cube_index + 1}_approach"
+                above_object,
+                other_objects,
+                1.0,
+                f"cube_{cube_index + 1}_approach",
+                optimization_spec=pick_spec,
             )
             all_stages_reached &= move_to(
-                grasp_position, other_objects, 1.0, f"cube_{cube_index + 1}_descend"
+                grasp_position,
+                other_objects,
+                1.0,
+                f"cube_{cube_index + 1}_descend",
+                optimization_spec=pick_spec,
             )
             apply_gripper(-1.0, cfg.close_steps, f"cube_{cube_index + 1}_close")
             constraint_id = attach_object(object_name)
             all_stages_reached &= move_to(
-                above_object, other_objects, -1.0, f"cube_{cube_index + 1}_lift"
+                above_object,
+                other_objects,
+                -1.0,
+                f"cube_{cube_index + 1}_lift",
+                optimization_spec=place_spec,
             )
             if true_obstacle is not None:
                 current_position = np.asarray(
@@ -483,9 +603,14 @@ def run_build_l_mpc_cbf_demo(
                     -1.0,
                     f"cube_{cube_index + 1}_transport_avoid",
                     tolerance=0.025,
+                    optimization_spec=place_spec,
                 )
             all_stages_reached &= move_to(
-                above_target, other_objects, -1.0, f"cube_{cube_index + 1}_transport"
+                above_target,
+                other_objects,
+                -1.0,
+                f"cube_{cube_index + 1}_transport",
+                optimization_spec=place_spec,
             )
             end_effector_place_reached = move_to(
                 place_position,
@@ -493,7 +618,8 @@ def run_build_l_mpc_cbf_demo(
                 -1.0,
                 f"cube_{cube_index + 1}_place",
                 tolerance=cfg.place_tolerance,
-                dynamic_cbf=False,
+                dynamic_cbf=place_spec is not None,
+                optimization_spec=place_spec,
             )
             env.sim.physics_client.removeConstraint(constraint_id)
             apply_gripper(1.0, cfg.open_steps, f"cube_{cube_index + 1}_release")
@@ -521,7 +647,8 @@ def run_build_l_mpc_cbf_demo(
                 body_positions(),
                 1.0,
                 f"cube_{cube_index + 1}_retreat",
-                dynamic_cbf=False,
+                dynamic_cbf=place_spec is not None,
+                optimization_spec=place_spec,
             )
 
         final_objects = np.asarray(body_positions())
@@ -545,6 +672,32 @@ def run_build_l_mpc_cbf_demo(
             mean_solve_time=float(np.mean(solve_times)),
             max_solve_time=float(np.max(solve_times)),
             output_dir=str(output_dir),
+            language_plan_used=language_result is not None,
+            language_model=(
+                language_result.model if language_result is not None else "not-used"
+            ),
+            language_tp_latency_seconds=(
+                language_result.tp_latency_seconds
+                if language_result is not None
+                else 0.0
+            ),
+            language_od_latency_seconds=(
+                language_result.od_latency_seconds
+                if language_result is not None
+                else 0.0
+            ),
+            language_od_fallbacks=(
+                language_result.od_fallbacks if language_result is not None else 0
+            ),
+            language_gammas=tuple(
+                spec.safety.gamma
+                for spec in (
+                    language_result.optimization_specs
+                    if language_result is not None
+                    else ()
+                )
+                if spec is not None
+            ),
         )
 
         trajectory = np.asarray(end_effector_positions)
@@ -714,11 +867,11 @@ def run_build_l_mpc_cbf_demo(
                     0.75,
                     0.83,
                     "LLM optimization formulator\n"
-                    f"model: {cfg.llm_model}\n"
-                    f"safety level: {cfg.llm_safety_level}/5\n"
-                    f"selected γ = {cfg.gamma:.2f}\n"
-                    f"latency: {cfg.llm_latency_seconds:.3f} s\n"
-                    f"fallback: {cfg.llm_fallback_used}",
+                    f"model: {result.language_model if result.language_plan_used else cfg.llm_model}\n"
+                    f"selected γ: {result.language_gammas if result.language_plan_used else (cfg.gamma,)}\n"
+                    f"TP latency: {result.language_tp_latency_seconds:.3f} s\n"
+                    f"OD latency: {result.language_od_latency_seconds:.3f} s\n"
+                    f"OD fallbacks: {result.language_od_fallbacks}",
                     fontsize=10,
                     va="top",
                     bbox=box_style,
@@ -797,6 +950,9 @@ def run_build_l_mpc_cbf_demo(
             ],
             "sensor_update_steps": sensor_update_steps,
             "solve_times": solve_times,
+            "language_result": (
+                asdict(language_result) if language_result is not None else None
+            ),
             "grasp_model": "fixed PyBullet constraint after gripper closure",
             "trajectory_legend": {
                 "orange": "raw executed approach trajectory",
@@ -805,7 +961,9 @@ def run_build_l_mpc_cbf_demo(
                 "yellow_dashed": "CBF safety boundary h=0 (not a trajectory)",
             },
             "language_control_boundary": (
-                "LLM selects task primitives and gamma; MPC-CBF computes trajectory"
+                "Validated TP/OD JSON selects the pick/place macro and bounded MPC-CBF "
+                "parameters; the trusted executor expands motion stages and MPC-CBF "
+                "computes the trajectory"
             ),
         }
         (output_dir / "metrics.json").write_text(

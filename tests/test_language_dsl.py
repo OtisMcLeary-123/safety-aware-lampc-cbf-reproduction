@@ -304,6 +304,27 @@ def test_two_stage_hf_planner_fails_closed_for_invalid_tp(scene, tmp_path):
     )
     with pytest.raises(LanguageDSLInferenceError, match="failed closed"):
         planner.formulate("unsafe output", scene, current_position=(0, 0, 0))
+
+
+def test_two_stage_hf_planner_rejects_missing_required_hazard(scene, tmp_path):
+    token_path = tmp_path / "token.txt"
+    token_path.write_text("test-token", encoding="utf-8")
+    task_payload = {
+        "version": DSL_VERSION,
+        "steps": [_move(_target(), [])],
+    }
+    client = _FakeClient([json.dumps(task_payload)])
+    planner = HuggingFaceSafeNarratePlanner(
+        SafeNarrateConfig(token_path=str(token_path)),
+        client_factory=lambda config, token: client,
+    )
+    with pytest.raises(LanguageDSLInferenceError, match="failed closed"):
+        planner.formulate(
+            "pick blue cube",
+            scene,
+            current_position=(0, 0, 0.1),
+            required_hazards=("moving_obstacle",),
+        )
     HuggingFaceSafeNarratePlanner,
     LanguageDSLInferenceError,
     SafeNarrateConfig,

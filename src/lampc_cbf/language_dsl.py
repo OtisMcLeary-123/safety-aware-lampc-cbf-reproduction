@@ -752,11 +752,18 @@ class HuggingFaceSafeNarratePlanner:
         scene_objects: Sequence[SceneObject],
         *,
         current_position: Sequence[float],
+        required_hazards: Sequence[str] = (),
     ) -> SafeNarrateResult:
         """Run TP once and OD once per move; never return unvalidated output."""
 
         if not instruction.strip():
             raise ValueError("instruction must be non-empty")
+        known_objects = {item.name for item in scene_objects}
+        hazards = tuple(required_hazards)
+        if len(set(hazards)) != len(hazards) or any(
+            hazard not in known_objects for hazard in hazards
+        ):
+            raise ValueError("required_hazards must contain unique known scene objects")
         # Import here so the DSL itself remains dependency-free and no token is
         # placed in environment variables or logs.
         from .hf_llm import load_hf_token
@@ -780,6 +787,12 @@ class HuggingFaceSafeNarratePlanner:
             for index, step in enumerate(plan.steps):
                 if step.action != "move" or step.target is None:
                     continue
+                if step.target.object_name in hazards:
+                    raise ValueError("a required hazard cannot be a move target")
+                if not set(hazards).issubset(step.avoid):
+                    raise ValueError(
+                        f"task-plan step {index} omits a required hazard"
+                    )
                 resolved = resolve_target(step.target, scene_objects, current_position)
                 if any(
                     value < lower or value > upper
