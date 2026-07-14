@@ -44,6 +44,9 @@ class SmoothDynamicConfig:
     safety_reflex_enabled: bool = True
     reflex_lookahead_steps: int = 8
     reflex_alpha: float = 4.0
+    reflex_backup_selection: str = "task_consistent"
+    reflex_committed_backup_enabled: bool = True
+    reflex_committed_backup_steps: int = 8
     avoidance_onset_threshold: float = 0.005
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
@@ -107,6 +110,10 @@ class SmoothDynamicConfig:
             raise ValueError("robot_velocity_maximum must be positive")
         if self.reflex_lookahead_steps < 1 or self.reflex_alpha <= 0.0:
             raise ValueError("reflex lookahead and alpha must be positive")
+        if self.reflex_backup_selection not in {"max_clearance", "task_consistent"}:
+            raise ValueError("invalid reflex backup selection")
+        if self.reflex_committed_backup_steps < 1:
+            raise ValueError("reflex committed backup steps must be positive")
         if self.avoidance_onset_threshold <= 0.0:
             raise ValueError("avoidance_onset_threshold must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
@@ -707,6 +714,9 @@ def run_smooth_dynamic_demo(
                     if cfg.prediction_mode == "velocity_tube"
                     else 0.0
                 ),
+                backup_selection=cfg.reflex_backup_selection,
+                committed_backup_enabled=cfg.reflex_committed_backup_enabled,
+                committed_backup_steps=cfg.reflex_committed_backup_steps,
             )
         )
         previous_control = np.zeros(4)

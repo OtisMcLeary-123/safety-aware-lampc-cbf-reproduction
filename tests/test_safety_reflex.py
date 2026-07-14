@@ -14,6 +14,7 @@ def _reflex(**overrides):
         "cbf_alpha": 4.0,
         "speed_limit": 0.2,
         "uncertainty_growth_per_second": 0.0,
+        "committed_backup_enabled": False,
     }
     values.update(overrides)
     return OperationalSpaceSafetyReflex(SafetyReflexConfig(**values))
@@ -76,6 +77,44 @@ def test_task_consistent_backup_prefers_safe_command_closest_to_nominal():
     assert task_consistent.filtered_minimum_clearance >= 0.0
     assert task_consistent.maximum_cbf_violation <= 1e-9
     assert task_deviation <= clearance_deviation
+
+
+def test_committed_backup_is_reused_until_nominal_becomes_safe():
+    reflex = _reflex(
+        lookahead_steps=20,
+        committed_backup_enabled=True,
+        committed_backup_steps=3,
+    )
+    obstacle = ReflexObstacle((0.08, 0.0, 0.0), (-0.2, 0.0, 0.0), 0.05)
+
+    first = reflex.gate((0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (obstacle,))
+    second = reflex.gate((0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (obstacle,))
+
+    assert first.reason == "task_consistent_escape_committed"
+    assert second.reason == "committed_backup"
+    assert second.velocity == pytest.approx(first.velocity)
+    assert reflex.committed_backup_steps_remaining == 1
+
+    safe_obstacle = ReflexObstacle((1.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.05)
+    released = reflex.gate((0.0, 0.0, 0.0), (0.0, 0.1, 0.0), (safe_obstacle,))
+    assert released.reason == "nominal_safe"
+    assert reflex.committed_backup_steps_remaining == 0
+
+
+def test_invalidated_committed_backup_is_not_reused():
+    reflex = _reflex(
+        lookahead_steps=20,
+        committed_backup_enabled=True,
+        committed_backup_steps=3,
+    )
+    obstacle = ReflexObstacle((0.08, 0.0, 0.0), (-0.2, 0.0, 0.0), 0.05)
+    first = reflex.gate((0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (obstacle,))
+    changed = ReflexObstacle((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.05)
+
+    result = reflex.gate((0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (changed,))
+
+    assert first.backup_used
+    assert result.reason != "committed_backup"
 
 
 def test_best_effort_escape_never_replaces_motion_with_worse_stationary_backup():

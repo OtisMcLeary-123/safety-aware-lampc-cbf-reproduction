@@ -73,6 +73,8 @@ class SafetyReflexConfig:
     feasibility_tolerance: float = 1e-9
     uncertainty_growth_per_second: float = 0.035
     backup_selection: str = "task_consistent"
+    committed_backup_enabled: bool = True
+    committed_backup_steps: int = 8
 
     def __post_init__(self) -> None:
         if not isfinite(self.dt) or self.dt <= 0.0:
@@ -93,6 +95,8 @@ class SafetyReflexConfig:
             raise ValueError(
                 "backup_selection must be max_clearance or task_consistent"
             )
+        if self.committed_backup_steps < 1:
+            raise ValueError("committed_backup_steps must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +120,26 @@ class OperationalSpaceSafetyReflex:
 
     def __init__(self, config: SafetyReflexConfig | None = None) -> None:
         self.config = config or SafetyReflexConfig()
+        self._committed_backup: tuple[Vector3, ...] = ()
+
+    @property
+    def committed_backup_steps_remaining(self) -> int:
+        return len(self._committed_backup)
+
+    def reset(self) -> None:
+        """Release state retained by the gatekeeper-style backup policy."""
+
+        self._committed_backup = ()
+
+    def _commit(self, velocity: Vector3) -> None:
+        self._committed_backup = tuple(
+            velocity for _ in range(self.config.committed_backup_steps)
+        )
+
+    def _consume_committed(self) -> Vector3:
+        velocity = self._committed_backup[0]
+        self._committed_backup = self._committed_backup[1:]
+        return velocity
 
     def _limit(self, velocity: Vector3) -> Vector3:
         magnitude = _norm(velocity)
@@ -214,6 +238,7 @@ class OperationalSpaceSafetyReflex:
             default=0.0,
         )
         if nominal_clearance >= 0.0 and nominal_violation <= self.config.feasibility_tolerance:
+            self.reset()
             return GatekeeperResult(
                 nominal, False, False, "nominal_safe", nominal_clearance,
                 nominal_clearance, nominal_violation,
@@ -222,10 +247,36 @@ class OperationalSpaceSafetyReflex:
         projected, violation = self.project(position, nominal, obstacles)
         projected_clearance = self.rollout_minimum_clearance(position, projected, obstacles)
         if projected_clearance >= 0.0 and violation <= self.config.feasibility_tolerance:
+            self.reset()
             return GatekeeperResult(
                 projected, True, False, "oscbf_projection", nominal_clearance,
                 projected_clearance, violation,
             )
+
+        # A previously certified backup is deliberately kept across control
+        # cycles. Revalidate it against the newest obstacle estimate before
+        # use because this reproduction does not assume a static environment.
+        if self.config.committed_backup_enabled and self._committed_backup:
+            committed = self._committed_backup[0]
+            committed_clearance = self.rollout_minimum_clearance(
+                position, committed, obstacles
+            )
+            committed_violation = max(
+                (
+                    max(0.0, -self.cbf_residual(position, committed, obstacle))
+                    for obstacle in obstacles
+                ),
+                default=0.0,
+            )
+            if (
+                committed_clearance >= 0.0
+                and committed_violation <= self.config.feasibility_tolerance
+            ):
+                return GatekeeperResult(
+                    self._consume_committed(), True, True, "committed_backup",
+                    nominal_clearance, committed_clearance, committed_violation,
+                )
+            self.reset()
 
         # A second projection starting from zero is one backup candidate.  A
         # stationary fallback is not intrinsically safe for moving obstacles,
@@ -316,6 +367,13 @@ class OperationalSpaceSafetyReflex:
                 evaluated, key=lambda item: (item[0], -item[1], _norm(item[2]))
             )
             reason = "best_effort_escape"
+        if (
+            feasible
+            and self.config.committed_backup_enabled
+        ):
+            self._commit(backup)
+            self._consume_committed()
+            reason = f"{reason}_committed"
         return GatekeeperResult(
             backup, True, True, reason, nominal_clearance,
             backup_clearance, backup_violation,
