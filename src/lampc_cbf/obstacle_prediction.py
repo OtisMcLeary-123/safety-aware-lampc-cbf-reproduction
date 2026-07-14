@@ -33,6 +33,10 @@ class UncertaintyTubeConfig:
     model_error_growth: float = 0.005
     max_relative_speed: float = 0.4
     total_latency: float = 0.04
+    sensor_period: float = 0.67
+    control_period: float = 0.04
+    obstacle_acceleration_bound: float = 0.0
+    sampled_data_margin_enabled: bool = True
 
     def __post_init__(self) -> None:
         values = (
@@ -43,11 +47,16 @@ class UncertaintyTubeConfig:
             self.model_error_growth,
             self.max_relative_speed,
             self.total_latency,
+            self.sensor_period,
+            self.control_period,
+            self.obstacle_acceleration_bound,
         )
         if any(not isfinite(value) or value < 0.0 for value in values):
             raise ValueError("uncertainty tube values must be finite and non-negative")
         if self.confidence_multiplier == 0.0:
             raise ValueError("confidence_multiplier must be positive")
+        if self.sensor_period == 0.0 or self.control_period == 0.0:
+            raise ValueError("sensor_period and control_period must be positive")
 
     @property
     def measurement_bound(self) -> float:
@@ -57,13 +66,47 @@ class UncertaintyTubeConfig:
     def latency_bound(self) -> float:
         return self.max_relative_speed * self.total_latency
 
+    @property
+    def intersample_bound(self) -> float:
+        """Reachable radial motion during one zero-order control hold."""
+
+        if not self.sampled_data_margin_enabled:
+            return 0.0
+        return (
+            self.max_relative_speed * self.control_period
+            + 0.5 * self.obstacle_acceleration_bound * self.control_period**2
+        )
+
+    def sensor_hold_growth(
+        self, *, velocity_error_bound: float | None = None
+    ) -> float:
+        """Maximum prediction growth accumulated during one sensor ZOH."""
+
+        velocity_bound = (
+            self.velocity_error_bound
+            if velocity_error_bound is None
+            else float(velocity_error_bound)
+        )
+        if not isfinite(velocity_bound) or velocity_bound < 0.0:
+            raise ValueError("velocity_error_bound must be finite and non-negative")
+        return (
+            (velocity_bound + self.model_error_growth) * self.sensor_period
+            + 0.5 * self.obstacle_acceleration_bound * self.sensor_period**2
+        )
+
     def inflation(
         self,
         prediction_age: float,
         *,
         velocity_error_bound: float | None = None,
     ) -> float:
-        """Return radial uncertainty at age ``prediction_age`` in meters."""
+        """Return a sampled-data radial reachable-set bound in meters.
+
+        ``prediction_age`` is measured from the timestamp of the held sensor
+        sample, so it already includes both sensor ZOH age and horizon lookahead.
+        ``intersample_bound`` separately covers motion between two control
+        samples, where checking only the discrete endpoints is insufficient.
+        """
 
         age = float(prediction_age)
         if not isfinite(age) or age < 0.0:
@@ -75,8 +118,16 @@ class UncertaintyTubeConfig:
         )
         if not isfinite(velocity_bound) or velocity_bound < 0.0:
             raise ValueError("velocity_error_bound must be finite and non-negative")
-        growth = (velocity_bound + self.model_error_growth) * age
-        return self.measurement_bound + self.latency_bound + growth
+        growth = (
+            (velocity_bound + self.model_error_growth) * age
+            + 0.5 * self.obstacle_acceleration_bound * age**2
+        )
+        return (
+            self.measurement_bound
+            + self.latency_bound
+            + self.intersample_bound
+            + growth
+        )
 
 
 def predict_constant_velocity(

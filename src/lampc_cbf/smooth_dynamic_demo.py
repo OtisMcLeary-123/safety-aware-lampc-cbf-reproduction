@@ -37,6 +37,8 @@ class SmoothDynamicConfig:
     model_error_growth: float = 0.005
     max_relative_speed: float = 0.4
     total_latency: float = 0.04
+    obstacle_acceleration_bound: float = 0.0
+    sampled_data_margin_enabled: bool = True
     velocity_filter: float = 1.0
     robot_velocity_filter: float = 0.5
     robot_velocity_maximum: float = 0.4
@@ -92,6 +94,8 @@ class SmoothDynamicConfig:
             raise ValueError("period and reference speed must be positive")
         if self.measurement_noise_sigma < 0.0:
             raise ValueError("measurement noise must be non-negative")
+        if self.obstacle_acceleration_bound < 0.0:
+            raise ValueError("obstacle_acceleration_bound must be non-negative")
         if self.gamma_update_ttl <= 0.0:
             raise ValueError("gamma_update_ttl must be positive")
         if self.reference_mode not in {"behind_spline", "straight", "direct_target"}:
@@ -685,6 +689,10 @@ def run_smooth_dynamic_demo(
                 model_error_growth=cfg.model_error_growth,
                 max_relative_speed=cfg.max_relative_speed,
                 total_latency=cfg.total_latency,
+                sensor_period=cfg.sensor_period,
+                control_period=mpc_config.dt,
+                obstacle_acceleration_bound=cfg.obstacle_acceleration_bound,
+                sampled_data_margin_enabled=cfg.sampled_data_margin_enabled,
             ),
             velocity_filter=cfg.velocity_filter,
             direct_target=cfg.reference_mode == "direct_target",
@@ -711,6 +719,11 @@ def run_smooth_dynamic_demo(
                 speed_limit=mpc_config.linear_input_limit,
                 uncertainty_growth_per_second=(
                     cfg.velocity_error_bound + cfg.model_error_growth
+                    if cfg.prediction_mode == "velocity_tube"
+                    else 0.0
+                ),
+                uncertainty_acceleration_bound=(
+                    cfg.obstacle_acceleration_bound
                     if cfg.prediction_mode == "velocity_tube"
                     else 0.0
                 ),
@@ -1328,6 +1341,24 @@ def run_smooth_dynamic_demo(
                 "mode": cfg.prediction_mode,
                 "bounded_measurement_error_m": tvp.tube.measurement_bound,
                 "latency_inflation_m": tvp.tube.latency_bound,
+                "control_zoh_intersample_inflation_m": (
+                    tvp.tube.intersample_bound
+                ),
+                "sensor_zoh_period_s": tvp.tube.sensor_period,
+                "control_zoh_period_s": tvp.tube.control_period,
+                "identified_sensor_hold_growth_m": (
+                    tvp.tube.sensor_hold_growth()
+                ),
+                "bootstrap_sensor_hold_growth_m": (
+                    tvp.tube.sensor_hold_growth(
+                        velocity_error_bound=(
+                            tvp.tube.initial_velocity_error_bound
+                        )
+                    )
+                ),
+                "obstacle_acceleration_bound_mps2": (
+                    tvp.tube.obstacle_acceleration_bound
+                ),
                 "initial_velocity_error_bound_mps": (
                     tvp.tube.initial_velocity_error_bound
                 ),

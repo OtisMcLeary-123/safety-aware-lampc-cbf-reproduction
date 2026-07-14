@@ -72,6 +72,7 @@ class SafetyReflexConfig:
     projection_passes: int = 8
     feasibility_tolerance: float = 1e-9
     uncertainty_growth_per_second: float = 0.035
+    uncertainty_acceleration_bound: float = 0.0
     backup_selection: str = "task_consistent"
     committed_backup_enabled: bool = True
     committed_backup_steps: int = 8
@@ -86,6 +87,7 @@ class SafetyReflexConfig:
             self.speed_limit,
             self.feasibility_tolerance,
             self.uncertainty_growth_per_second,
+            self.uncertainty_acceleration_bound,
         )
         if any(not isfinite(value) or value < 0.0 for value in values):
             raise ValueError("reflex parameters must be finite and non-negative")
@@ -220,6 +222,7 @@ class OperationalSpaceSafetyReflex:
                 radius = (
                     obstacle.robust_radius
                     + self.config.uncertainty_growth_per_second * time
+                    + 0.5 * self.config.uncertainty_acceleration_bound * time**2
                 )
                 clearance = _norm(tuple(a - b for a, b in zip(robot, center))) - radius
                 minimum = min(minimum, clearance)

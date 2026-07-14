@@ -169,8 +169,8 @@ def test_tube_uses_bootstrap_velocity_bound_until_first_distinct_measurement():
     identified = provider.uncertainty_at_age(0.6)
 
     assert bootstrap > identified
-    assert bootstrap == pytest.approx(0.154)
-    assert identified == pytest.approx(0.052)
+    assert bootstrap == pytest.approx(0.170)
+    assert identified == pytest.approx(0.068)
 
 
 @pytest.mark.skipif(

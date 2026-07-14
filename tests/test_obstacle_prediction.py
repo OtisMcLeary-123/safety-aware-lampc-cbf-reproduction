@@ -24,11 +24,41 @@ def test_uncertainty_tube_grows_with_age_and_includes_latency():
     )
     assert tube.measurement_bound == pytest.approx(0.015)
     assert tube.latency_bound == pytest.approx(0.016)
-    assert tube.inflation(0.0) == pytest.approx(0.031)
-    assert tube.inflation(0.6) == pytest.approx(0.052)
+    assert tube.intersample_bound == pytest.approx(0.016)
+    assert tube.inflation(0.0) == pytest.approx(0.047)
+    assert tube.inflation(0.6) == pytest.approx(0.068)
     assert tube.inflation(
         0.6, velocity_error_bound=tube.initial_velocity_error_bound
-    ) == pytest.approx(0.154)
+    ) == pytest.approx(0.170)
+
+
+def test_sampled_data_tube_accounts_for_acceleration_and_can_replay_legacy_bound():
+    robust = UncertaintyTubeConfig(
+        measurement_sigma=0.0,
+        velocity_error_bound=0.0,
+        model_error_growth=0.0,
+        max_relative_speed=0.4,
+        total_latency=0.0,
+        sensor_period=0.5,
+        control_period=0.1,
+        obstacle_acceleration_bound=0.2,
+    )
+    legacy = UncertaintyTubeConfig(
+        measurement_sigma=0.0,
+        velocity_error_bound=0.0,
+        model_error_growth=0.0,
+        max_relative_speed=0.4,
+        total_latency=0.0,
+        sensor_period=0.5,
+        control_period=0.1,
+        obstacle_acceleration_bound=0.2,
+        sampled_data_margin_enabled=False,
+    )
+
+    assert robust.intersample_bound == pytest.approx(0.041)
+    assert robust.inflation(0.5) == pytest.approx(0.066)
+    assert legacy.intersample_bound == 0.0
+    assert legacy.inflation(0.5) == pytest.approx(0.025)
 
 
 def test_observer_estimates_velocity_and_predicts_from_timestamp():
