@@ -258,3 +258,7 @@ def run_safety_reflex_ablation(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
     return summary
+
+
+if __name__ == "__main__":
+    print(json.dumps(run_safety_reflex_ablation(), indent=2))

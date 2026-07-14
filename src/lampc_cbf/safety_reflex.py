@@ -383,31 +383,6 @@ class OperationalSpaceSafetyReflex:
                 projected_clearance, violation,
             )
 
-        # A previously certified backup is deliberately kept across control
-        # cycles. Revalidate it against the newest obstacle estimate before
-        # use because this reproduction does not assume a static environment.
-        if self.config.committed_backup_enabled and self._committed_backup:
-            committed = self._committed_backup[0]
-            committed_clearance = self.rollout_minimum_clearance(
-                position, committed, obstacles
-            )
-            committed_violation = max(
-                (
-                    max(0.0, -self.barrier_residual(position, committed, obstacle))
-                    for obstacle in obstacles
-                ),
-                default=0.0,
-            )
-            if (
-                committed_clearance >= 0.0
-                and committed_violation <= self.config.feasibility_tolerance
-            ):
-                return GatekeeperResult(
-                    self._consume_committed(), True, True, "committed_backup",
-                    nominal_clearance, committed_clearance, committed_violation,
-                )
-            self.reset()
-
         # A second projection starting from zero is one backup candidate.  A
         # stationary fallback is not intrinsically safe for moving obstacles,
         # so deterministic escape directions are evaluated as well.
@@ -468,6 +443,30 @@ class OperationalSpaceSafetyReflex:
             if item[0] >= 0.0
             and item[1] <= self.config.feasibility_tolerance
         ]
+        committed_evaluation: tuple[float, float, Vector3] | None = None
+        if self.config.committed_backup_enabled and self._committed_backup:
+            committed = self._committed_backup[0]
+            committed_clearance = self.rollout_minimum_clearance(
+                position, committed, obstacles
+            )
+            committed_violation = max(
+                (
+                    max(0.0, -self.barrier_residual(position, committed, obstacle))
+                    for obstacle in obstacles
+                ),
+                default=0.0,
+            )
+            if (
+                committed_clearance >= 0.0
+                and committed_violation <= self.config.feasibility_tolerance
+            ):
+                committed_evaluation = (
+                    committed_clearance,
+                    committed_violation,
+                    committed,
+                )
+            else:
+                self.reset()
         if feasible:
             if self.config.backup_selection == "max_clearance":
                 backup_clearance, backup_violation, backup = max(
@@ -492,7 +491,34 @@ class OperationalSpaceSafetyReflex:
                     ),
                 )
                 reason = "task_consistent_escape"
+            if committed_evaluation is not None:
+                committed_cost = sum(
+                    (value - target) ** 2
+                    for value, target in zip(committed_evaluation[2], nominal)
+                )
+                new_cost = sum(
+                    (value - target) ** 2
+                    for value, target in zip(backup, nominal)
+                )
+                # Keep the certified suffix unless the newly verified candidate
+                # improves task tracking. This follows gatekeeper's update rule
+                # more closely than blindly freezing an old escape command.
+                if committed_cost <= new_cost + 1e-12:
+                    backup_clearance, backup_violation, _ = committed_evaluation
+                    backup = self._consume_committed()
+                    reason = "committed_backup"
+                    return GatekeeperResult(
+                        backup, True, True, reason, nominal_clearance,
+                        backup_clearance, backup_violation,
+                    )
         else:
+            if committed_evaluation is not None:
+                backup_clearance, backup_violation, _ = committed_evaluation
+                backup = self._consume_committed()
+                return GatekeeperResult(
+                    backup, True, True, "committed_backup", nominal_clearance,
+                    backup_clearance, backup_violation,
+                )
             backup_clearance, backup_violation, backup = max(
                 evaluated, key=lambda item: (item[0], -item[1], _norm(item[2]))
             )
