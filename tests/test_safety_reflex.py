@@ -179,6 +179,93 @@ def test_collision_cone_projection_is_safe_and_minimally_changes_nominal():
     assert sum(value * value for value in projected) ** 0.5 <= 0.2 + 1e-12
 
 
+def test_policy_library_latches_collision_cone_side_across_nominal_perturbations():
+    reflex = _reflex(
+        barrier_mode="collision_cone",
+        side_latch_enabled=True,
+        side_latch_steps=3,
+        policy_library_enabled=True,
+    )
+    obstacle = ReflexObstacle((0.0, 0.2, 0.0), (0.0, 0.0, 0.0), 0.05)
+
+    first = reflex.gate(
+        (0.0, 0.0, 0.0), (0.001, 0.2, 0.0), (obstacle,),
+        goal_position=(0.0, 0.3, 0.0),
+    )
+    perturbed = reflex.gate(
+        (0.0, 0.0, 0.0), (-0.001, 0.2, 0.0), (obstacle,),
+        goal_position=(0.0, 0.3, 0.0),
+    )
+
+    assert first.intervened and perturbed.intervened
+    assert first.avoidance_side in (-1, 1)
+    assert perturbed.avoidance_side == first.avoidance_side
+    assert reflex.side_switches == 0
+    assert perturbed.filtered_minimum_clearance >= 0.0
+    assert perturbed.maximum_cbf_violation <= 1e-9
+
+
+def test_policy_library_emits_same_side_tangential_subgoal():
+    reflex = _reflex(
+        barrier_mode="collision_cone",
+        side_latch_enabled=True,
+        policy_library_enabled=True,
+        tangential_subgoal_enabled=True,
+    )
+    obstacle = ReflexObstacle((0.0, 0.2, 0.0), (0.0, 0.0, 0.0), 0.05)
+
+    result = reflex.gate(
+        (0.0, 0.0, 0.0), (0.0, 0.2, 0.0), (obstacle,),
+        goal_position=(0.0, 0.3, 0.0),
+    )
+
+    assert result.avoidance_side in (-1, 1)
+    assert result.temporary_subgoal is not None
+    assert result.filtered_minimum_clearance >= 0.0
+    tangent = reflex._tangent_direction((0.0, 0.0, 0.0), obstacle)
+    subgoal_direction = tuple(
+        value for value in result.temporary_subgoal
+    )
+    assert result.avoidance_side * sum(
+        a * b for a, b in zip(subgoal_direction, tangent)
+    ) > 0.0
+
+
+def test_policy_library_configuration_requires_collision_cone():
+    with pytest.raises(ValueError, match="collision_cone"):
+        SafetyReflexConfig(policy_library_enabled=True)
+    with pytest.raises(ValueError, match="policy library"):
+        SafetyReflexConfig(tangential_subgoal_enabled=True)
+
+
+def test_policy_library_labels_robust_recovery_and_keeps_physical_safety():
+    reflex = _reflex(
+        barrier_mode="collision_cone",
+        side_latch_enabled=True,
+        policy_library_enabled=True,
+    )
+    obstacle = ReflexObstacle(
+        (0.15, 0.0, 0.0), (0.0, 0.0, 0.0), 0.05, uncertainty=0.11
+    )
+
+    result = reflex.gate(
+        (0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (obstacle,),
+        goal_position=(0.3, 0.0, 0.0),
+    )
+    physical = ReflexObstacle(obstacle.position, obstacle.velocity, obstacle.radius)
+
+    assert result.reason == "policy_library_recovery"
+    assert result.robust_recovery
+    assert result.avoidance_side in (-1, 1)
+    assert reflex.rollout_minimum_clearance(
+        (0.0, 0.0, 0.0), result.velocity, (physical,),
+        include_uncertainty_growth=False,
+    ) >= 0.0
+    assert reflex.collision_cone_residual(
+        (0.0, 0.0, 0.0), result.velocity, physical
+    ) >= -1e-9
+
+
 @pytest.mark.parametrize("radius", [-0.1, float("nan")])
 def test_obstacle_rejects_invalid_radius(radius):
     with pytest.raises(ValueError):

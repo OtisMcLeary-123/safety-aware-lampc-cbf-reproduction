@@ -77,6 +77,18 @@ class SafetyReflexConfig:
     committed_backup_enabled: bool = True
     committed_backup_steps: int = 8
     barrier_mode: str = "radial_cbf"
+    side_latch_enabled: bool = False
+    side_latch_steps: int = 15
+    side_release_clearance: float = 0.05
+    side_switch_hysteresis: float = 0.01
+    policy_library_enabled: bool = False
+    policy_speed_scales: tuple[float, ...] = (0.50, 0.75, 1.0)
+    policy_progress_weight: float = 4.0
+    policy_deviation_weight: float = 1.0
+    policy_switch_penalty: float = 0.05
+    recovery_clearance_slack: float = 0.005
+    tangential_subgoal_enabled: bool = False
+    tangential_subgoal_distance: float = 0.10
 
     def __post_init__(self) -> None:
         if not isfinite(self.dt) or self.dt <= 0.0:
@@ -102,6 +114,30 @@ class SafetyReflexConfig:
             raise ValueError("committed_backup_steps must be positive")
         if self.barrier_mode not in {"radial_cbf", "collision_cone"}:
             raise ValueError("barrier_mode must be radial_cbf or collision_cone")
+        if self.side_latch_steps < 1:
+            raise ValueError("side_latch_steps must be positive")
+        if any(
+            not isfinite(value) or value < 0.0
+            for value in (
+                self.side_release_clearance,
+                self.side_switch_hysteresis,
+                self.policy_progress_weight,
+                self.policy_deviation_weight,
+                self.policy_switch_penalty,
+                self.recovery_clearance_slack,
+                self.tangential_subgoal_distance,
+            )
+        ):
+            raise ValueError("policy-library parameters must be finite and non-negative")
+        if not self.policy_speed_scales or any(
+            not isfinite(value) or not 0.0 < value <= 1.0
+            for value in self.policy_speed_scales
+        ):
+            raise ValueError("policy_speed_scales must be non-empty values in (0, 1]")
+        if self.policy_library_enabled and self.barrier_mode != "collision_cone":
+            raise ValueError("policy_library_enabled requires collision_cone mode")
+        if self.tangential_subgoal_enabled and not self.policy_library_enabled:
+            raise ValueError("tangential subgoals require the policy library")
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +149,18 @@ class GatekeeperResult:
     nominal_minimum_clearance: float
     filtered_minimum_clearance: float
     maximum_cbf_violation: float
+    selected_policy: str = "nominal"
+    avoidance_side: int = 0
+    side_switched: bool = False
+    temporary_subgoal: Vector3 | None = None
+    robust_recovery: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _PolicyCandidate:
+    name: str
+    velocity: Vector3
+    side: int = 0
 
 
 class OperationalSpaceSafetyReflex:
@@ -126,15 +174,54 @@ class OperationalSpaceSafetyReflex:
     def __init__(self, config: SafetyReflexConfig | None = None) -> None:
         self.config = config or SafetyReflexConfig()
         self._committed_backup: tuple[Vector3, ...] = ()
+        self._latched_side = 0
+        self._side_steps_remaining = 0
+        self._side_switches = 0
+        self._last_policy = "nominal"
 
     @property
     def committed_backup_steps_remaining(self) -> int:
         return len(self._committed_backup)
 
+    @property
+    def latched_side(self) -> int:
+        return self._latched_side
+
+    @property
+    def side_switches(self) -> int:
+        return self._side_switches
+
     def reset(self) -> None:
         """Release state retained by the gatekeeper-style backup policy."""
 
         self._committed_backup = ()
+        self._latched_side = 0
+        self._side_steps_remaining = 0
+        self._side_switches = 0
+        self._last_policy = "nominal"
+
+    def _release_committed(self) -> None:
+        self._committed_backup = ()
+
+    def _advance_side_latch(self, nominal_clearance: float) -> None:
+        if self._side_steps_remaining > 0:
+            self._side_steps_remaining -= 1
+        if (
+            self._side_steps_remaining == 0
+            and nominal_clearance >= self.config.side_release_clearance
+        ):
+            self._latched_side = 0
+            self._last_policy = "nominal"
+
+    def _set_latched_side(self, side: int) -> bool:
+        if not self.config.side_latch_enabled or side == 0:
+            return False
+        switched = self._latched_side not in (0, side)
+        if switched:
+            self._side_switches += 1
+        self._latched_side = side
+        self._side_steps_remaining = self.config.side_latch_steps
+        return switched
 
     def _commit(self, velocity: Vector3) -> None:
         self._committed_backup = tuple(
@@ -251,6 +338,368 @@ class OperationalSpaceSafetyReflex:
         )
         return tuple(candidates)
 
+    def _tangent_direction(
+        self, point: Vector3, obstacle: ReflexObstacle
+    ) -> Vector3:
+        """Return a deterministic positive circulation direction.
+
+        The Safe Panda task is predominantly planar, so world ``+z`` defines
+        the circulation orientation.  The fallbacks keep the construction
+        well-defined for vertical alignments without changing the side label.
+        """
+
+        toward = _unit(tuple(a - b for a, b in zip(obstacle.position, point)))
+        if toward is None:
+            toward = (1.0, 0.0, 0.0)
+        tangent = _unit(_cross((0.0, 0.0, 1.0), toward))
+        if tangent is None:
+            tangent = _unit(_cross((0.0, 1.0, 0.0), toward))
+        return tangent or (1.0, 0.0, 0.0)
+
+    def _candidate_side(
+        self,
+        point: Vector3,
+        velocity: Vector3,
+        obstacle: ReflexObstacle,
+    ) -> int:
+        tangent = self._tangent_direction(point, obstacle)
+        relative = tuple(a - b for a, b in zip(velocity, obstacle.velocity))
+        circulation = _dot(relative, tangent)
+        if abs(circulation) <= 1e-10:
+            return 0
+        return 1 if circulation > 0.0 else -1
+
+    def _policy_candidates(
+        self,
+        point: Vector3,
+        nominal: Vector3,
+        obstacles: Sequence[ReflexObstacle],
+        *,
+        include_library: bool,
+        goal: Vector3 | None,
+    ) -> tuple[_PolicyCandidate, ...]:
+        candidates: list[_PolicyCandidate] = []
+        projected, _ = self.project(point, nominal, obstacles)
+        if obstacles:
+            side = self._candidate_side(point, projected, obstacles[0])
+        else:
+            side = 0
+        candidates.append(_PolicyCandidate("cone_projection", projected, side))
+        if not include_library:
+            return tuple(candidates)
+
+        for obstacle_index, obstacle in enumerate(obstacles):
+            tangent = self._tangent_direction(point, obstacle)
+            toward = _unit(
+                tuple(a - b for a, b in zip(obstacle.position, point))
+            ) or (1.0, 0.0, 0.0)
+            away = tuple(-value for value in toward)
+            goal_direction = (
+                _unit(tuple(a - b for a, b in zip(goal, point)))
+                if goal is not None
+                else None
+            ) or _unit(nominal) or (0.0, 1.0, 0.0)
+            for side in (-1, 1):
+                signed_tangent = tuple(side * value for value in tangent)
+                for scale in self.config.policy_speed_scales:
+                    relative_speed = self.config.speed_limit * scale
+                    world_tangent_velocity = tuple(
+                        relative_speed * direction
+                        for direction in signed_tangent
+                    )
+                    candidates.append(
+                        _PolicyCandidate(
+                            f"world_tangent_{obstacle_index}_{side:+d}_{scale:.2f}",
+                            world_tangent_velocity,  # type: ignore[arg-type]
+                            side,
+                        )
+                    )
+                    goal_tangent_direction = _unit(
+                        tuple(
+                            goal_axis + 1.25 * tangent_axis + 0.20 * away_axis
+                            for goal_axis, tangent_axis, away_axis in zip(
+                                goal_direction, signed_tangent, away
+                            )
+                        )
+                    )
+                    assert goal_tangent_direction is not None
+                    candidates.append(
+                        _PolicyCandidate(
+                            f"goal_tangent_{obstacle_index}_{side:+d}_{scale:.2f}",
+                            tuple(
+                                relative_speed * direction
+                                for direction in goal_tangent_direction
+                            ),  # type: ignore[arg-type]
+                            side,
+                        )
+                    )
+                    tangent_velocity = self._limit(
+                        tuple(
+                            obstacle_speed + relative_speed * direction
+                            for obstacle_speed, direction in zip(
+                                obstacle.velocity, signed_tangent
+                            )
+                        )
+                    )
+                    candidates.append(
+                        _PolicyCandidate(
+                            f"tangent_{obstacle_index}_{side:+d}_{scale:.2f}",
+                            tangent_velocity,
+                            side,
+                        )
+                    )
+                    escape_direction = _unit(
+                        tuple(
+                            direction + 0.35 * radial
+                            for direction, radial in zip(signed_tangent, away)
+                        )
+                    )
+                    assert escape_direction is not None
+                    escape_velocity = self._limit(
+                        tuple(
+                            obstacle_speed + relative_speed * direction
+                            for obstacle_speed, direction in zip(
+                                obstacle.velocity, escape_direction
+                            )
+                        )
+                    )
+                    candidates.append(
+                        _PolicyCandidate(
+                            f"circulation_{obstacle_index}_{side:+d}_{scale:.2f}",
+                            escape_velocity,
+                            side,
+                        )
+                    )
+            candidates.append(
+                _PolicyCandidate(
+                    f"match_obstacle_{obstacle_index}",
+                    self._limit(obstacle.velocity),
+                    0,
+                )
+            )
+        candidates.append(_PolicyCandidate("stop", (0.0, 0.0, 0.0), 0))
+
+        unique: list[_PolicyCandidate] = []
+        seen: set[tuple[float, float, float]] = set()
+        for candidate in candidates:
+            key = tuple(round(value, 12) for value in candidate.velocity)
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        return tuple(unique)
+
+    def _policy_score(
+        self,
+        candidate: _PolicyCandidate,
+        point: Vector3,
+        nominal: Vector3,
+        goal: Vector3 | None,
+    ) -> float:
+        horizon = self.config.dt * self.config.lookahead_steps
+        task_deviation = sum(
+            (value - target) ** 2
+            for value, target in zip(candidate.velocity, nominal)
+        )
+        if goal is None:
+            progress = horizon * _dot(candidate.velocity, nominal)
+        else:
+            current_distance = _norm(tuple(a - b for a, b in zip(point, goal)))
+            endpoint = tuple(
+                value + horizon * speed
+                for value, speed in zip(point, candidate.velocity)
+            )
+            progress = current_distance - _norm(
+                tuple(a - b for a, b in zip(endpoint, goal))
+            )
+        switch_cost = (
+            self.config.policy_switch_penalty
+            if self._latched_side not in (0, candidate.side)
+            else 0.0
+        )
+        neutral_cost = (
+            self.config.policy_switch_penalty
+            if candidate.side == 0 and self._latched_side != 0
+            else 0.0
+        )
+        return (
+            -self.config.policy_progress_weight * progress
+            + self.config.policy_deviation_weight * task_deviation
+            + switch_cost
+            + neutral_cost
+        )
+
+    def _temporary_subgoal(
+        self,
+        point: Vector3,
+        obstacle: ReflexObstacle,
+        side: int,
+        goal: Vector3 | None,
+    ) -> Vector3 | None:
+        if not self.config.tangential_subgoal_enabled or side == 0:
+            return None
+        tangent = self._tangent_direction(point, obstacle)
+        away = _unit(tuple(a - b for a, b in zip(point, obstacle.position)))
+        away = away or (1.0, 0.0, 0.0)
+        goal_direction = (
+            _unit(tuple(a - b for a, b in zip(goal, point)))
+            if goal is not None
+            else None
+        ) or (0.0, 0.0, 0.0)
+        direction = _unit(
+            tuple(
+                0.75 * side * tangent_axis
+                + goal_axis
+                + 0.15 * away_axis
+                for tangent_axis, goal_axis, away_axis in zip(
+                    tangent, goal_direction, away
+                )
+            )
+        )
+        assert direction is not None
+        return tuple(
+            value + self.config.tangential_subgoal_distance * axis
+            for value, axis in zip(point, direction)
+        )  # type: ignore[return-value]
+
+    def _select_collision_cone_policy(
+        self,
+        point: Vector3,
+        nominal: Vector3,
+        obstacles: Sequence[ReflexObstacle],
+        goal: Vector3 | None,
+    ) -> tuple[_PolicyCandidate, float, float, bool, bool] | None:
+        candidates = self._policy_candidates(
+            point,
+            nominal,
+            obstacles,
+            include_library=self.config.policy_library_enabled,
+            goal=goal,
+        )
+        evaluated: list[tuple[float, float, float, _PolicyCandidate]] = []
+        recovery: list[tuple[float, float, float, _PolicyCandidate]] = []
+        for candidate in candidates:
+            clearance = self.rollout_minimum_clearance(
+                point, candidate.velocity, obstacles
+            )
+            violation = max(
+                (
+                    max(
+                        0.0,
+                        -self.barrier_residual(
+                            point, candidate.velocity, obstacle
+                        ),
+                    )
+                    for obstacle in obstacles
+                ),
+                default=0.0,
+            )
+            if (
+                clearance >= 0.0
+                and violation <= self.config.feasibility_tolerance
+            ):
+                evaluated.append(
+                    (
+                        self._policy_score(candidate, point, nominal, goal),
+                        clearance,
+                        violation,
+                        candidate,
+                    )
+                )
+            elif self.config.policy_library_enabled:
+                physical_obstacles = tuple(
+                    ReflexObstacle(
+                        obstacle.position,
+                        obstacle.velocity,
+                        obstacle.radius,
+                        0.0,
+                        obstacle.name,
+                    )
+                    for obstacle in obstacles
+                )
+                physical_clearance = self.rollout_minimum_clearance(
+                    point,
+                    candidate.velocity,
+                    physical_obstacles,
+                    include_uncertainty_growth=False,
+                )
+                physical_violation = max(
+                    (
+                        max(
+                            0.0,
+                            -self.barrier_residual(
+                                point, candidate.velocity, obstacle
+                            ),
+                        )
+                        for obstacle in physical_obstacles
+                    ),
+                    default=0.0,
+                )
+                if (
+                    physical_clearance >= 0.0
+                    and physical_violation <= self.config.feasibility_tolerance
+                ):
+                    recovery.append(
+                        (
+                            clearance,
+                            violation,
+                            self._policy_score(
+                                candidate, point, nominal, goal
+                            ),
+                            candidate,
+                        )
+                    )
+        if not evaluated and not recovery:
+            return None
+
+        current_side = self._latched_side if self.config.side_latch_enabled else 0
+        if not evaluated:
+            same_side_recovery = [
+                item for item in recovery if item[3].side in (0, current_side)
+            ] if current_side else recovery
+            sided_recovery = [item for item in same_side_recovery if item[3].side]
+            pool = sided_recovery or same_side_recovery or recovery
+            best_clearance = max(item[0] for item in pool)
+            near_best = [
+                item
+                for item in pool
+                if item[0]
+                >= best_clearance - self.config.recovery_clearance_slack
+            ]
+            selected_recovery = min(
+                near_best,
+                key=lambda item: (
+                    item[2],
+                    item[1],
+                    -item[0],
+                    item[3].name,
+                ),
+            )
+            switched = self._set_latched_side(selected_recovery[3].side)
+            self._last_policy = selected_recovery[3].name
+            return (
+                selected_recovery[3],
+                selected_recovery[0],
+                selected_recovery[1],
+                switched,
+                True,
+            )
+        same_side = [
+            item for item in evaluated if item[3].side in (0, current_side)
+        ] if current_side else evaluated
+        opposite = [
+            item for item in evaluated if item[3].side not in (0, current_side)
+        ] if current_side else []
+        selected = min(same_side or evaluated, key=lambda item: (item[0], -item[1], item[3].name))
+        if opposite and self._side_steps_remaining == 0:
+            best_opposite = min(
+                opposite, key=lambda item: (item[0], -item[1], item[3].name)
+            )
+            if best_opposite[0] + self.config.side_switch_hysteresis < selected[0]:
+                selected = best_opposite
+        switched = self._set_latched_side(selected[3].side)
+        self._last_policy = selected[3].name
+        return selected[3], selected[1], selected[2], switched, False
+
     def project(
         self,
         position: Sequence[float],
@@ -334,6 +783,8 @@ class OperationalSpaceSafetyReflex:
         position: Sequence[float],
         velocity: Sequence[float],
         obstacles: Sequence[ReflexObstacle],
+        *,
+        include_uncertainty_growth: bool = True,
     ) -> float:
         point = _vector3(position, "position")
         command = _vector3(velocity, "velocity")
@@ -347,9 +798,15 @@ class OperationalSpaceSafetyReflex:
                     for value, speed in zip(obstacle.position, obstacle.velocity)
                 )
                 radius = (
-                    obstacle.robust_radius
-                    + self.config.uncertainty_growth_per_second * time
-                    + 0.5 * self.config.uncertainty_acceleration_bound * time**2
+                    (
+                        obstacle.robust_radius
+                        + self.config.uncertainty_growth_per_second * time
+                        + 0.5
+                        * self.config.uncertainty_acceleration_bound
+                        * time**2
+                    )
+                    if include_uncertainty_growth
+                    else obstacle.radius
                 )
                 clearance = _norm(tuple(a - b for a, b in zip(robot, center))) - radius
                 minimum = min(minimum, clearance)
@@ -360,24 +817,81 @@ class OperationalSpaceSafetyReflex:
         position: Sequence[float],
         nominal_velocity: Sequence[float],
         obstacles: Sequence[ReflexObstacle],
+        goal_position: Sequence[float] | None = None,
     ) -> GatekeeperResult:
+        point = _vector3(position, "position")
         nominal = self._limit(_vector3(nominal_velocity, "nominal_velocity"))
+        goal = (
+            _vector3(goal_position, "goal_position")
+            if goal_position is not None
+            else None
+        )
         nominal_clearance = self.rollout_minimum_clearance(position, nominal, obstacles)
+        self._advance_side_latch(nominal_clearance)
         nominal_violation = max(
             (max(0.0, -self.barrier_residual(position, nominal, obstacle)) for obstacle in obstacles),
             default=0.0,
         )
         if nominal_clearance >= 0.0 and nominal_violation <= self.config.feasibility_tolerance:
-            self.reset()
+            self._release_committed()
+            subgoal = (
+                self._temporary_subgoal(
+                    point, obstacles[0], self._latched_side, goal
+                )
+                if obstacles
+                else None
+            )
             return GatekeeperResult(
                 nominal, False, False, "nominal_safe", nominal_clearance,
                 nominal_clearance, nominal_violation,
+                selected_policy=self._last_policy,
+                avoidance_side=self._latched_side,
+                temporary_subgoal=subgoal,
             )
+
+        if (
+            self.config.barrier_mode == "collision_cone"
+            and (self.config.side_latch_enabled or self.config.policy_library_enabled)
+        ):
+            selected = self._select_collision_cone_policy(
+                point, nominal, obstacles, goal
+            )
+            if selected is not None:
+                policy, clearance, violation, switched, robust_recovery = selected
+                subgoal = (
+                    self._temporary_subgoal(
+                        point, obstacles[0], policy.side, goal
+                    )
+                    if obstacles
+                    else None
+                )
+                return GatekeeperResult(
+                    policy.velocity,
+                    True,
+                    policy.name != "cone_projection",
+                    (
+                        (
+                            "policy_library_recovery"
+                            if robust_recovery
+                            else "policy_library"
+                        )
+                        if self.config.policy_library_enabled
+                        else "side_latched_projection"
+                    ),
+                    nominal_clearance,
+                    clearance,
+                    violation,
+                    selected_policy=policy.name,
+                    avoidance_side=policy.side,
+                    side_switched=switched,
+                    temporary_subgoal=subgoal,
+                    robust_recovery=robust_recovery,
+                )
 
         projected, violation = self.project(position, nominal, obstacles)
         projected_clearance = self.rollout_minimum_clearance(position, projected, obstacles)
         if projected_clearance >= 0.0 and violation <= self.config.feasibility_tolerance:
-            self.reset()
+            self._release_committed()
             return GatekeeperResult(
                 projected, True, False, "oscbf_projection", nominal_clearance,
                 projected_clearance, violation,
@@ -388,7 +902,6 @@ class OperationalSpaceSafetyReflex:
         # so deterministic escape directions are evaluated as well.
         backup, backup_violation = self.project(position, (0.0, 0.0, 0.0), obstacles)
         backup_clearance = self.rollout_minimum_clearance(position, backup, obstacles)
-        point = _vector3(position, "position")
         candidates: list[Vector3] = [backup, projected, (0.0, 0.0, 0.0)]
         axes: tuple[Vector3, ...] = (
             (1.0, 0.0, 0.0),
@@ -466,7 +979,7 @@ class OperationalSpaceSafetyReflex:
                     committed,
                 )
             else:
-                self.reset()
+                self._release_committed()
         if feasible:
             if self.config.backup_selection == "max_clearance":
                 backup_clearance, backup_violation, backup = max(

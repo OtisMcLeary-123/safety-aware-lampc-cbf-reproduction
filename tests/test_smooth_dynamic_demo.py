@@ -103,6 +103,28 @@ def test_reference_provider_hot_swaps_valid_gamma() -> None:
         provider.update_gamma(0.2)
 
 
+def test_reference_provider_temporarily_tracks_liveness_subgoal() -> None:
+    path = np.column_stack(
+        [np.zeros(20), np.linspace(0.0, 1.0, 20), np.ones(20)]
+    )
+    provider = ReferenceObstacleTVP(
+        path, (2.0, 2.0, 1.0), reference_speed=0.1,
+        obstacle_radius=0.1, collision_radius=0.035,
+        gamma=0.1, dt=0.04, horizon=15,
+    )
+    provider.update((0.0, 0.0, 1.0), (2.0, 2.0, 1.0))
+    provider.set_temporary_subgoal((0.1, 0.0, 1.0))
+
+    diverted = provider.prediction_at_stage(1)
+    provider.set_temporary_subgoal(None)
+    nominal = provider.prediction_at_stage(1)
+
+    assert diverted.reference_state[0] > 0.0
+    assert diverted.reference_state[4] > 0.0
+    assert nominal.reference_state[0] == pytest.approx(0.0)
+    assert nominal.reference_state[5] > 0.0
+
+
 def test_reference_provider_preserves_paper_transition_default() -> None:
     path = np.column_stack(
         [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]

@@ -50,6 +50,15 @@ class SmoothDynamicConfig:
     reflex_committed_backup_enabled: bool = True
     reflex_committed_backup_steps: int = 8
     reflex_barrier_mode: str = "radial_cbf"
+    reflex_side_latch_enabled: bool = False
+    reflex_side_latch_steps: int = 15
+    reflex_side_release_clearance: float = 0.05
+    reflex_side_switch_hysteresis: float = 0.01
+    reflex_policy_library_enabled: bool = False
+    reflex_policy_speed_scales: tuple[float, ...] = (0.50, 0.75, 1.0)
+    reflex_recovery_clearance_slack: float = 0.005
+    reflex_tangential_subgoal_enabled: bool = False
+    reflex_tangential_subgoal_distance: float = 0.10
     avoidance_onset_threshold: float = 0.005
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
@@ -121,6 +130,27 @@ class SmoothDynamicConfig:
             raise ValueError("reflex committed backup steps must be positive")
         if self.reflex_barrier_mode not in {"radial_cbf", "collision_cone"}:
             raise ValueError("invalid reflex barrier mode")
+        if self.reflex_side_latch_steps < 1:
+            raise ValueError("reflex side latch steps must be positive")
+        if self.reflex_side_release_clearance < 0.0:
+            raise ValueError("reflex side release clearance must be non-negative")
+        if self.reflex_side_switch_hysteresis < 0.0:
+            raise ValueError("reflex side switch hysteresis must be non-negative")
+        if not self.reflex_policy_speed_scales or any(
+            not 0.0 < value <= 1.0 for value in self.reflex_policy_speed_scales
+        ):
+            raise ValueError("reflex policy speed scales must be in (0, 1]")
+        if self.reflex_policy_library_enabled and self.reflex_barrier_mode != "collision_cone":
+            raise ValueError("reflex policy library requires collision cone mode")
+        if (
+            self.reflex_tangential_subgoal_enabled
+            and not self.reflex_policy_library_enabled
+        ):
+            raise ValueError("tangential subgoal requires reflex policy library")
+        if self.reflex_tangential_subgoal_distance < 0.0:
+            raise ValueError("tangential subgoal distance must be non-negative")
+        if self.reflex_recovery_clearance_slack < 0.0:
+            raise ValueError("reflex recovery clearance slack must be non-negative")
         if self.avoidance_onset_threshold <= 0.0:
             raise ValueError("avoidance_onset_threshold must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
@@ -192,6 +222,9 @@ class SmoothDynamicResult:
     gamma_updates_rejected: int
     reflex_interventions: int
     reflex_backups: int
+    reflex_side_switches: int
+    reflex_policy_selections: int
+    reflex_robust_recoveries: int
     mean_optimal_decay: float
     minimum_optimal_decay: float
     avoidance_onset_time: float | None
@@ -317,6 +350,8 @@ class ReferenceObstacleTVP:
         )
         self.arc_length = np.concatenate([[0.0], np.cumsum(segment_lengths)])
         self.progress_index = 0
+        self.robot_position = self.reference_path[0].copy()
+        self.temporary_subgoal: Any | None = None
         self._obstacle_tvp = None
         self._obstacle_next_tvp = None
         self._robust_radius_tvp = None
@@ -346,6 +381,21 @@ class ReferenceObstacleTVP:
         self.clearance_margin = float(clearance_margin)
         self.speed_scale = float(speed_scale)
 
+    def set_temporary_subgoal(
+        self, subgoal: Sequence[float] | None
+    ) -> None:
+        """Set or release a short-lived liveness waypoint for the next MPC step."""
+
+        import numpy as np
+
+        if subgoal is None:
+            self.temporary_subgoal = None
+            return
+        point = np.asarray(subgoal, dtype=float).reshape(3)
+        if not np.all(np.isfinite(point)):
+            raise ValueError("temporary subgoal must be a finite 3-vector")
+        self.temporary_subgoal = point.copy()
+
     def update(
         self,
         robot_position: Sequence[float],
@@ -368,6 +418,7 @@ class ReferenceObstacleTVP:
         distances = np.linalg.norm(self.reference_path[start:] - position, axis=1)
         nearest = start + int(np.argmin(distances))
         self.progress_index = max(self.progress_index, nearest)
+        self.robot_position = position.copy()
         self.measurement = measurement.copy()
         self.control_time = float(control_time)
         self.observer.observe(measurement, float(measurement_time))
@@ -419,19 +470,34 @@ class ReferenceObstacleTVP:
                 np.searchsorted(self.arc_length, target_distance, side="left"),
             )
         )
-        point = self.reference_path[index]
-        next_index = min(index + 1, len(self.reference_path) - 1)
-        tangent = self.reference_path[next_index] - point
-        tangent_norm = float(np.linalg.norm(tangent))
-        desired_velocity = (
-            tangent / tangent_norm * self.reference_speed * self.speed_scale
-            if (
-                not self.direct_target
-                and tangent_norm > 1e-9
-                and index < len(self.reference_path) - 1
+        if self.temporary_subgoal is not None:
+            displacement = self.temporary_subgoal - self.robot_position
+            distance = float(np.linalg.norm(displacement))
+            direction = displacement / distance if distance > 1e-9 else np.zeros(3)
+            travel = min(
+                distance,
+                (stage + 1) * self.dt * self.reference_speed * self.speed_scale,
             )
-            else np.zeros(3)
-        )
+            point = self.robot_position + travel * direction
+            desired_velocity = (
+                direction * self.reference_speed * self.speed_scale
+                if distance > 1e-9
+                else np.zeros(3)
+            )
+        else:
+            point = self.reference_path[index]
+            next_index = min(index + 1, len(self.reference_path) - 1)
+            tangent = self.reference_path[next_index] - point
+            tangent_norm = float(np.linalg.norm(tangent))
+            desired_velocity = (
+                tangent / tangent_norm * self.reference_speed * self.speed_scale
+                if (
+                    not self.direct_target
+                    and tangent_norm > 1e-9
+                    and index < len(self.reference_path) - 1
+                )
+                else np.zeros(3)
+            )
         reference_state = np.concatenate([point, [0.0], desired_velocity, [0.0]])
         stage_age = (
             max(0.0, self.control_time - self.observer.timestamp) + stage * self.dt
@@ -734,6 +800,19 @@ def run_smooth_dynamic_demo(
                 committed_backup_enabled=cfg.reflex_committed_backup_enabled,
                 committed_backup_steps=cfg.reflex_committed_backup_steps,
                 barrier_mode=cfg.reflex_barrier_mode,
+                side_latch_enabled=cfg.reflex_side_latch_enabled,
+                side_latch_steps=cfg.reflex_side_latch_steps,
+                side_release_clearance=cfg.reflex_side_release_clearance,
+                side_switch_hysteresis=cfg.reflex_side_switch_hysteresis,
+                policy_library_enabled=cfg.reflex_policy_library_enabled,
+                policy_speed_scales=cfg.reflex_policy_speed_scales,
+                recovery_clearance_slack=cfg.reflex_recovery_clearance_slack,
+                tangential_subgoal_enabled=(
+                    cfg.reflex_tangential_subgoal_enabled
+                ),
+                tangential_subgoal_distance=(
+                    cfg.reflex_tangential_subgoal_distance
+                ),
             )
         )
         previous_control = np.zeros(4)
@@ -1097,7 +1176,10 @@ def run_smooth_dynamic_demo(
                             "moving_obstacle",
                         ),
                     ),
+                    goal_position=goal,
                 )
+                if cfg.reflex_tangential_subgoal_enabled:
+                    tvp.set_temporary_subgoal(reflex_result.temporary_subgoal)
                 candidate[:3] = reflex_result.velocity
                 reflex_intervened = reflex_result.intervened
                 reflex_backup_used = reflex_result.backup_used
@@ -1111,6 +1193,11 @@ def run_smooth_dynamic_demo(
                             "nominal_minimum_clearance": reflex_result.nominal_minimum_clearance,
                             "filtered_minimum_clearance": reflex_result.filtered_minimum_clearance,
                             "maximum_cbf_violation": reflex_result.maximum_cbf_violation,
+                            "selected_policy": reflex_result.selected_policy,
+                            "avoidance_side": reflex_result.avoidance_side,
+                            "side_switched": reflex_result.side_switched,
+                            "temporary_subgoal": reflex_result.temporary_subgoal,
+                            "robust_recovery": reflex_result.robust_recovery,
                         }
                     )
             pre_step_position = position.copy()
@@ -1186,6 +1273,13 @@ def run_smooth_dynamic_demo(
                     "mean_goal_progress_rate": net_progress / elapsed_after_step,
                     "reflex_intervened": reflex_intervened,
                     "reflex_backup_used": reflex_backup_used,
+                    "reflex_avoidance_side": reflex.latched_side,
+                    "reflex_side_switches": reflex.side_switches,
+                    "temporary_subgoal": (
+                        tvp.temporary_subgoal.tolist()
+                        if tvp.temporary_subgoal is not None
+                        else None
+                    ),
                     "solver_feasible": last_solver_feasible,
                 }
             )
@@ -1292,6 +1386,13 @@ def run_smooth_dynamic_demo(
             ),
             reflex_interventions=len(reflex_audits),
             reflex_backups=sum(int(item["backup_used"]) for item in reflex_audits),
+            reflex_side_switches=reflex.side_switches,
+            reflex_policy_selections=sum(
+                item["selected_policy"] != "nominal" for item in reflex_audits
+            ),
+            reflex_robust_recoveries=sum(
+                bool(item["robust_recovery"]) for item in reflex_audits
+            ),
             mean_optimal_decay=float(np.mean(optimal_decay_trace)),
             minimum_optimal_decay=float(np.min(optimal_decay_trace)),
             avoidance_onset_time=avoidance_onset_time,

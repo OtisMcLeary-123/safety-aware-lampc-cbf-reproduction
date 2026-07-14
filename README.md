@@ -199,6 +199,28 @@ This compares waypoint switching with a continuous B-spline reference, `Delta u`
 PYTHONPATH=src python scripts/run_paired_benchmark.py --episodes 500 --workers 4
 ```
 
+### Run the collision-cone liveness ablation
+
+This paired 20-episode workflow compares the existing memoryless collision
+cone with side latching, a hard-screened policy library, and a same-side
+tangential MPC subgoal. It keeps the 140-step budget fixed and uses raw
+trajectory safety metrics.
+
+```bash
+PYTHONPATH=src python scripts/run_collision_cone_liveness_ablation.py \
+  --episodes 20 --workers 4 --max-steps 140
+```
+
+The frozen variants and promotion gates are documented in the
+[collision-cone liveness protocol](docs/COLLISION_CONE_LIVENESS_PROTOCOL.md).
+
+The current paired result removed the four observed controller stalls without
+increasing the timeout: `4/20 → 0/20`, with zero collisions in both conditions.
+Interventions fell from 1,290 to 587 (`-54.5%`) and mean goal progress increased
+from 77.3 mm to 198.8 mm. The target still had 17/20 safety timeouts and 383
+explicit robust-recovery steps, so this is evidence of improved liveness—not a
+formal robust-safety or task-completion claim.
+
 <details>
 <summary><strong>Additional experiment commands</strong></summary>
 
