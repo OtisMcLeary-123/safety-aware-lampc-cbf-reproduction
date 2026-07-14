@@ -46,6 +46,15 @@ class SmoothDynamicConfig:
     safety_mode: str = "cbf"
     gamma_schedule: tuple[tuple[float, float], ...] = ()
     gamma_update_ttl: float = 1.0
+    context_safety_enabled: bool = False
+    requested_safety_level: int = 3
+    provisional_feedback_times: tuple[float, ...] = ()
+    feedback_ttc_threshold: float | None = None
+    feedback_response_latency: float = 0.0
+    feedback_gamma: float | None = None
+    solver_max_constraint_violation: float = 1e-6
+    control_deadline: float = 0.04
+    reject_deadline_miss: bool = False
     save_plots: bool = True
     save_metrics: bool = True
     output_dir: str = "artifacts/smoothness_ablation/spline_du_0.5"
@@ -65,10 +74,12 @@ class SmoothDynamicConfig:
             raise ValueError("measurement noise must be non-negative")
         if self.gamma_update_ttl <= 0.0:
             raise ValueError("gamma_update_ttl must be positive")
-        if self.reference_mode not in {"behind_spline", "straight"}:
-            raise ValueError("reference_mode must be behind_spline or straight")
-        if self.prediction_mode not in {"static", "velocity_tube"}:
-            raise ValueError("prediction_mode must be static or velocity_tube")
+        if self.reference_mode not in {"behind_spline", "straight", "direct_target"}:
+            raise ValueError(
+                "reference_mode must be behind_spline, straight, or direct_target"
+            )
+        if self.prediction_mode not in {"static", "velocity", "velocity_tube"}:
+            raise ValueError("prediction_mode must be static, velocity, or velocity_tube")
         if not 0.0 <= self.velocity_filter <= 1.0:
             raise ValueError("velocity_filter must be in [0, 1]")
         if self.reflex_lookahead_steps < 1 or self.reflex_alpha <= 0.0:
@@ -77,6 +88,24 @@ class SmoothDynamicConfig:
             raise ValueError("avoidance_onset_threshold must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
             raise ValueError("safety_mode must be cbf, distance, or none")
+        if not 1 <= self.requested_safety_level <= 5:
+            raise ValueError("requested_safety_level must be in [1, 5]")
+        if self.solver_max_constraint_violation < 0.0:
+            raise ValueError("solver_max_constraint_violation must be non-negative")
+        if self.control_deadline <= 0.0:
+            raise ValueError("control_deadline must be positive")
+        if any(time < 0.0 for time in self.provisional_feedback_times):
+            raise ValueError("provisional feedback times must be non-negative")
+        if tuple(sorted(self.provisional_feedback_times)) != self.provisional_feedback_times:
+            raise ValueError("provisional feedback times must be sorted")
+        if self.feedback_ttc_threshold is not None and self.feedback_ttc_threshold <= 0.0:
+            raise ValueError("feedback_ttc_threshold must be positive when provided")
+        if self.feedback_response_latency < 0.0:
+            raise ValueError("feedback_response_latency must be non-negative")
+        if self.feedback_gamma is not None and not 0.0 < self.feedback_gamma <= 0.15:
+            raise ValueError("feedback_gamma must be in (0, 0.15] when provided")
+        if (self.feedback_ttc_threshold is None) != (self.feedback_gamma is None):
+            raise ValueError("TTC feedback requires both threshold and feedback_gamma")
         previous_time = -1.0
         for update_time, gamma in self.gamma_schedule:
             if update_time < 0.0 or update_time < previous_time:
@@ -88,6 +117,7 @@ class SmoothDynamicConfig:
 
 @dataclass(frozen=True, slots=True)
 class SmoothDynamicResult:
+    outcome: str
     reached_goal: bool
     collision: bool
     steps: int
@@ -106,6 +136,18 @@ class SmoothDynamicResult:
     minimum_optimal_decay: float
     avoidance_onset_time: float | None
     minimum_predicted_ttc: float | None
+    solver_failures: int
+    solver_rejections: int
+    deadline_misses: int
+    emergency_fallbacks: int
+    maximum_constraint_violation: float | None
+    mean_model_transition_error: float
+    max_model_transition_error: float
+    mean_action_tracking_error: float
+    max_action_tracking_error: float
+    feedback_trigger_time: float | None
+    feedback_available_time: float | None
+    feedback_causal_opportunity: bool
     smoothness: SmoothnessMetrics
     output_dir: str
 
@@ -128,6 +170,7 @@ class ReferenceObstacleTVP:
         prediction_mode: str = "velocity_tube",
         tube_config: Any | None = None,
         velocity_filter: float = 0.5,
+        direct_target: bool = False,
     ) -> None:
         import numpy as np
 
@@ -144,18 +187,21 @@ class ReferenceObstacleTVP:
             velocity_filter=velocity_filter,
         )
         self.reference_speed = reference_speed
-        self.combined_radius = obstacle_radius + collision_radius
+        self.base_combined_radius = obstacle_radius + collision_radius
+        self.clearance_margin = 0.0
+        self.speed_scale = 1.0
         self.gamma = gamma
         self.dt = dt
         self.horizon = horizon
         if safety_mode not in {"cbf", "distance", "none"}:
             raise ValueError("invalid safety_mode")
         self.safety_mode = safety_mode
-        if prediction_mode not in {"static", "velocity_tube"}:
+        if prediction_mode not in {"static", "velocity", "velocity_tube"}:
             raise ValueError("invalid prediction_mode")
         self.prediction_mode = prediction_mode
         self.tube = tube_config or UncertaintyTubeConfig()
         self.control_time = 0.0
+        self.direct_target = direct_target
         segment_lengths = np.linalg.norm(
             np.diff(self.reference_path, axis=0), axis=1
         )
@@ -174,6 +220,21 @@ class ReferenceObstacleTVP:
         if not 0.0 < gamma <= 0.15:
             raise ValueError("gamma must be in the experimental interval (0, 0.15]")
         self.gamma = float(gamma)
+
+    def update_safety_profile(
+        self, *, gamma: float, clearance_margin: float, speed_scale: float
+    ) -> None:
+        """Apply a bounded context profile to all horizon stages atomically."""
+
+        if not 0.0 < gamma <= 0.15:
+            raise ValueError("gamma must be in (0, 0.15]")
+        if clearance_margin < 0.0:
+            raise ValueError("clearance_margin must be non-negative")
+        if not 0.0 < speed_scale <= 1.0:
+            raise ValueError("speed_scale must be in (0, 1]")
+        self.gamma = float(gamma)
+        self.clearance_margin = float(clearance_margin)
+        self.speed_scale = float(speed_scale)
 
     def update(
         self,
@@ -261,9 +322,14 @@ class ReferenceObstacleTVP:
             del t_now
             base_distance = self.arc_length[self.progress_index]
             for stage in range(self.horizon + 1):
-                target_distance = min(
-                    self.arc_length[-1],
-                    base_distance + stage * self.dt * self.reference_speed,
+                target_distance = (
+                    self.arc_length[-1]
+                    if self.direct_target
+                    else min(
+                        self.arc_length[-1],
+                        base_distance
+                        + stage * self.dt * self.reference_speed * self.speed_scale,
+                    )
                 )
                 index = int(
                     min(
@@ -276,8 +342,12 @@ class ReferenceObstacleTVP:
                 tangent = self.reference_path[next_index] - point
                 tangent_norm = float(np.linalg.norm(tangent))
                 desired_velocity = (
-                    tangent / tangent_norm * self.reference_speed
-                    if tangent_norm > 1e-9 and index < len(self.reference_path) - 1
+                    tangent / tangent_norm * self.reference_speed * self.speed_scale
+                    if (
+                        not self.direct_target
+                        and tangent_norm > 1e-9
+                        and index < len(self.reference_path) - 1
+                    )
                     else np.zeros(3)
                 )
                 reference_state = np.concatenate(
@@ -285,20 +355,30 @@ class ReferenceObstacleTVP:
                 )
                 stage_age = max(0.0, self.control_time - self.observer.timestamp) + stage * self.dt
                 next_age = stage_age + self.dt
-                if self.prediction_mode == "velocity_tube":
+                if self.prediction_mode in {"velocity", "velocity_tube"}:
                     obstacle_position = np.asarray(
                         self.observer.predict(self.observer.timestamp + stage_age), dtype=float
                     )
                     obstacle_next_position = np.asarray(
                         self.observer.predict(self.observer.timestamp + next_age), dtype=float
                     )
-                    robust_radius = self.combined_radius + self.tube.inflation(stage_age)
-                    robust_radius_next = self.combined_radius + self.tube.inflation(next_age)
+                    tube_now = (
+                        self.tube.inflation(stage_age)
+                        if self.prediction_mode == "velocity_tube"
+                        else 0.0
+                    )
+                    tube_next = (
+                        self.tube.inflation(next_age)
+                        if self.prediction_mode == "velocity_tube"
+                        else 0.0
+                    )
+                    robust_radius = self.base_combined_radius + self.clearance_margin + tube_now
+                    robust_radius_next = self.base_combined_radius + self.clearance_margin + tube_next
                 else:
                     obstacle_position = self.measurement
                     obstacle_next_position = self.measurement
-                    robust_radius = self.combined_radius
-                    robust_radius_next = self.combined_radius
+                    robust_radius = self.base_combined_radius + self.clearance_margin
+                    robust_radius_next = self.base_combined_radius + self.clearance_margin
                 template["_tvp", stage, "obstacle_position"] = (
                     obstacle_position.reshape(3, 1)
                 )
@@ -337,6 +417,17 @@ def run_smooth_dynamic_demo(
         ReflexObstacle,
         SafetyReflexConfig,
     )
+    from .safety_scheduler import (
+        ContextAwareSafetyScheduler,
+        constant_velocity_ttc,
+        feedback_has_causal_opportunity,
+    )
+    from .solver import (
+        FeasibilityPolicy,
+        diagnostics_from_do_mpc,
+        safe_control_or_none,
+    )
+    from .safe_panda import simulator_calibration_sample
     from .smoothness import (
         calculate_smoothness_metrics,
         make_reference_bspline,
@@ -362,6 +453,14 @@ def run_smooth_dynamic_demo(
     goal_distances: list[float] = []
     solve_times: list[float] = []
     predicted_ttc_values: list[float] = []
+    context_profile_trace: list[dict[str, Any]] = []
+    model_transition_errors: list[float] = []
+    action_tracking_errors: list[float] = []
+    solver_audits: list[dict[str, Any]] = []
+    solver_failures = 0
+    solver_rejections = 0
+    emergency_fallbacks = 0
+    constraint_violations: list[float] = []
     sensor_update_steps: list[int] = [0]
 
     try:
@@ -383,7 +482,7 @@ def run_smooth_dynamic_demo(
         observation = env._get_obs()
 
         combined_radius = cfg.obstacle_radius + cfg.collision_radius
-        if cfg.reference_mode == "straight":
+        if cfg.reference_mode in {"straight", "direct_target"}:
             route_points = np.asarray([start, goal])
             reference_path = np.linspace(start, goal, 600)
         else:
@@ -428,6 +527,7 @@ def run_smooth_dynamic_demo(
                 total_latency=cfg.total_latency,
             ),
             velocity_filter=cfg.velocity_filter,
+            direct_target=cfg.reference_mode == "direct_target",
         )
         _, mpc = build_mpc_controller(
             mpc_config,
@@ -456,6 +556,7 @@ def run_smooth_dynamic_demo(
         mpc.set_initial_guess()
         reached_goal = False
         collision = False
+        truncated = False
         next_sensor_time = cfg.sensor_period
         last_measurement_time = 0.0
         schedule_index = 0
@@ -467,9 +568,41 @@ def run_smooth_dynamic_demo(
         reflex_audits: list[dict[str, Any]] = []
         optimal_decay_trace: list[float] = []
         avoidance_onset_time: float | None = None
+        safety_scheduler = ContextAwareSafetyScheduler()
+        feasibility_policy = FeasibilityPolicy(
+            max_constraint_violation=cfg.solver_max_constraint_violation
+        )
+        provisional_index = 0
+        provisional_safety_active = False
+        ttc_feedback_trigger_time: float | None = None
+        ttc_feedback_available_time: float | None = None
+        ttc_feedback_published = False
+        ttc_feedback_causal_opportunity = False
 
         for step_index in range(cfg.max_steps):
             elapsed = step_index * mpc_config.dt
+            while (
+                provisional_index < len(cfg.provisional_feedback_times)
+                and elapsed + 1e-12 >= cfg.provisional_feedback_times[provisional_index]
+            ):
+                provisional_safety_active = True
+                provisional_index += 1
+            if (
+                ttc_feedback_available_time is not None
+                and not ttc_feedback_published
+                and elapsed + 1e-12 >= ttc_feedback_available_time
+            ):
+                gamma_queue.publish(
+                    GammaUpdate(
+                        gamma=float(cfg.feedback_gamma),
+                        version=len(cfg.gamma_schedule) + 1,
+                        created_at=elapsed,
+                        valid_until=elapsed + cfg.gamma_update_ttl,
+                        reason="ttc_triggered_online_feedback",
+                        source="benchmark_replay",
+                    )
+                )
+                ttc_feedback_published = True
             while (
                 schedule_index < len(cfg.gamma_schedule)
                 and elapsed + 1e-12 >= cfg.gamma_schedule[schedule_index][0]
@@ -494,6 +627,10 @@ def run_smooth_dynamic_demo(
             )
             if gamma_audit.applied is not None:
                 tvp.update_gamma(gamma_audit.applied.gamma)
+                # The deterministic provisional profile protects the latency
+                # window only. Once a validated update arrives, hand control
+                # back to the updated MPC parameter.
+                provisional_safety_active = False
                 applied_gamma_updates.append(
                     {
                         "scheduled_time": gamma_audit.applied.created_at,
@@ -517,6 +654,53 @@ def run_smooth_dynamic_demo(
                 control_time=elapsed,
                 measurement_time=last_measurement_time,
             )
+            estimated_position = np.asarray(tvp.observer.predict(elapsed), dtype=float)
+            estimated_velocity = np.asarray(
+                tvp.observer.velocity
+                if cfg.prediction_mode in {"velocity", "velocity_tube"}
+                else (0.0, 0.0, 0.0),
+                dtype=float,
+            )
+            predicted_ttc = constant_velocity_ttc(
+                position - estimated_position,
+                previous_control[:3] - estimated_velocity,
+                combined_radius,
+            )
+            if predicted_ttc is not None:
+                predicted_ttc_values.append(predicted_ttc)
+            if (
+                cfg.feedback_ttc_threshold is not None
+                and ttc_feedback_trigger_time is None
+                and predicted_ttc is not None
+                and predicted_ttc <= cfg.feedback_ttc_threshold
+            ):
+                ttc_feedback_trigger_time = elapsed
+                ttc_feedback_available_time = elapsed + cfg.feedback_response_latency
+                ttc_feedback_causal_opportunity = feedback_has_causal_opportunity(
+                    predicted_ttc,
+                    cfg.feedback_response_latency,
+                )
+                provisional_safety_active = True
+            if cfg.context_safety_enabled or provisional_safety_active:
+                profile = safety_scheduler.select(
+                    predicted_ttc=predicted_ttc,
+                    requested_safety_level=(
+                        1 if provisional_safety_active else cfg.requested_safety_level
+                    ),
+                )
+                tvp.update_safety_profile(
+                    gamma=profile.gamma,
+                    clearance_margin=profile.clearance_margin,
+                    speed_scale=profile.speed_scale,
+                )
+                context_profile_trace.append(
+                    {
+                        "step": step_index,
+                        "time": elapsed,
+                        "predicted_ttc": predicted_ttc,
+                        **asdict(profile),
+                    }
+                )
             measured_state = np.concatenate([position, [0.0], previous_control])
             if mpc_config.uses_jerk_state:
                 measured_state = np.concatenate([measured_state, previous_increment])
@@ -524,23 +708,64 @@ def run_smooth_dynamic_demo(
             raw_candidate = np.asarray(
                 mpc.make_step(measured_state.reshape(-1, 1)), dtype=float
             ).reshape(-1)
-            solve_times.append(perf_counter() - started)
+            measured_solve_time = perf_counter() - started
+            solve_times.append(measured_solve_time)
             expected_dimension = 5 if mpc_config.uses_optimal_decay else 4
-            if raw_candidate.shape != (expected_dimension,) or not np.all(np.isfinite(raw_candidate)):
-                raise RuntimeError("MPC returned an invalid control vector")
-            candidate = raw_candidate[:4].copy()
+            diagnostics = diagnostics_from_do_mpc(
+                mpc, measured_solve_time=measured_solve_time
+            )
+            deadline_missed = measured_solve_time > cfg.control_deadline
+            accepted = safe_control_or_none(
+                raw_candidate,
+                diagnostics,
+                policy=feasibility_policy,
+                expected_dimension=expected_dimension,
+            )
+            if cfg.reject_deadline_miss and deadline_missed:
+                accepted = None
+            if not diagnostics.solver_success:
+                solver_failures += 1
+            if diagnostics.constraint_violation is not None:
+                constraint_violations.append(diagnostics.constraint_violation)
+            rejected_candidate = accepted is None
+            if rejected_candidate:
+                solver_rejections += 1
+                emergency_fallbacks += 1
+                candidate = np.zeros(4, dtype=float)
+            else:
+                candidate = np.asarray(accepted[:4], dtype=float)
+            solver_audits.append(
+                {
+                    "step": step_index,
+                    "time": elapsed,
+                    "termination": diagnostics.termination.value,
+                    "return_status": diagnostics.raw_status,
+                    "solver_success": diagnostics.solver_success,
+                    "constraint_violation": diagnostics.constraint_violation,
+                    "iterations": diagnostics.iterations,
+                    "solve_time": measured_solve_time,
+                    "deadline_missed": deadline_missed,
+                    "candidate_rejected": rejected_candidate,
+                }
+            )
             optimal_decay_trace.append(
-                float(raw_candidate[4]) if mpc_config.uses_optimal_decay else 1.0
+                float(raw_candidate[4])
+                if mpc_config.uses_optimal_decay
+                and raw_candidate.shape == (expected_dimension,)
+                and np.isfinite(raw_candidate[4])
+                and not rejected_candidate
+                else 1.0
             )
             nominal_candidate = candidate.copy()
-            if cfg.safety_reflex_enabled and cfg.safety_mode != "none":
-                prediction_age = max(0.0, elapsed - tvp.observer.timestamp)
-                estimated_position = tvp.observer.predict(elapsed)
-                estimated_velocity = (
-                    tvp.observer.velocity
-                    if cfg.prediction_mode == "velocity_tube"
-                    else (0.0, 0.0, 0.0)
+            if (
+                (
+                    cfg.safety_reflex_enabled
+                    or provisional_safety_active
+                    or rejected_candidate
                 )
+                and cfg.safety_mode != "none"
+            ):
+                prediction_age = max(0.0, elapsed - tvp.observer.timestamp)
                 uncertainty = (
                     tvp.tube.inflation(prediction_age)
                     if cfg.prediction_mode == "velocity_tube"
@@ -572,6 +797,8 @@ def run_smooth_dynamic_demo(
                             "maximum_cbf_violation": reflex_result.maximum_cbf_violation,
                         }
                     )
+            pre_step_position = position.copy()
+            model_velocity = previous_control[:3].copy()
             action = paper_control_to_safe_panda_action(
                 candidate, env.action_space.shape[0],
                 linear_input_limit=mpc_config.linear_input_limit,
@@ -584,6 +811,15 @@ def run_smooth_dynamic_demo(
             env.sim.set_base_pose("unsafe_region_1", true_obstacle, quaternion)
             task.unsafe_state_1_pos = true_obstacle.copy()
             position = np.asarray(observation["achieved_goal"], dtype=float)
+            calibration = simulator_calibration_sample(
+                pre_step_position,
+                position,
+                model_velocity,
+                candidate[:3],
+                mpc_config.dt,
+            )
+            model_transition_errors.append(calibration.model_transition_error)
+            action_tracking_errors.append(calibration.action_tracking_error)
             true_clearance = float(
                 np.linalg.norm(position - true_obstacle) - combined_radius
             )
@@ -596,16 +832,6 @@ def run_smooth_dynamic_demo(
                 and abs(float(position[0] - start[0])) >= cfg.avoidance_onset_threshold
             ):
                 avoidance_onset_time = (step_index + 1) * mpc_config.dt
-            relative_position = position - true_obstacle
-            relative_velocity = candidate[:3] - obstacle_velocity
-            ttc_a = float(np.dot(relative_velocity, relative_velocity))
-            ttc_b = float(2.0 * np.dot(relative_position, relative_velocity))
-            ttc_c = float(np.dot(relative_position, relative_position) - combined_radius**2)
-            discriminant = ttc_b * ttc_b - 4.0 * ttc_a * ttc_c
-            if ttc_a > 1e-12 and discriminant >= 0.0:
-                root = (-ttc_b - float(np.sqrt(discriminant))) / (2.0 * ttc_a)
-                if root >= 0.0:
-                    predicted_ttc_values.append(root)
             positions.append(position.copy())
             true_obstacles.append(true_obstacle.copy())
             measured_obstacles.append(measurement.copy())
@@ -681,6 +907,17 @@ def run_smooth_dynamic_demo(
             )
 
         result = SmoothDynamicResult(
+            outcome=(
+                "collision"
+                if collision
+                else "goal"
+                if reached_goal
+                else "environment_truncated"
+                if truncated
+                else "emergency_fallback"
+                if emergency_fallbacks
+                else "timeout"
+            ),
             reached_goal=reached_goal,
             collision=collision,
             steps=len(raw_positions),
@@ -701,6 +938,22 @@ def run_smooth_dynamic_demo(
             minimum_predicted_ttc=(
                 float(min(predicted_ttc_values)) if predicted_ttc_values else None
             ),
+            solver_failures=solver_failures,
+            solver_rejections=solver_rejections,
+            deadline_misses=sum(
+                solve_time > cfg.control_deadline for solve_time in solve_times
+            ),
+            emergency_fallbacks=emergency_fallbacks,
+            maximum_constraint_violation=(
+                float(max(constraint_violations)) if constraint_violations else None
+            ),
+            mean_model_transition_error=float(np.mean(model_transition_errors)),
+            max_model_transition_error=float(np.max(model_transition_errors)),
+            mean_action_tracking_error=float(np.mean(action_tracking_errors)),
+            max_action_tracking_error=float(np.max(action_tracking_errors)),
+            feedback_trigger_time=ttc_feedback_trigger_time,
+            feedback_available_time=ttc_feedback_available_time,
+            feedback_causal_opportunity=ttc_feedback_causal_opportunity,
             smoothness=smoothness,
             output_dir=str(output_dir),
         )
@@ -722,6 +975,8 @@ def run_smooth_dynamic_demo(
             },
             "applied_gamma_updates": applied_gamma_updates,
             "gamma_trace": gamma_trace,
+            "context_profile_trace": context_profile_trace,
+            "solver_audits": solver_audits,
             "positions": raw_positions.tolist(),
             "visual_spline": visual_spline.tolist(),
             "true_obstacles": true_array.tolist(),

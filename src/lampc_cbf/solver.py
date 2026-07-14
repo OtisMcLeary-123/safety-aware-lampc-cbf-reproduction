@@ -199,6 +199,90 @@ def diagnostics_from_stats(
     )
 
 
+def _numeric_vector(value: object) -> tuple[float, ...]:
+    """Flatten CasADi DM/structured values without importing CasADi."""
+
+    candidate = getattr(value, "cat", value)
+    full = getattr(candidate, "full", None)
+    if callable(full):
+        candidate = full()
+    tolist = getattr(candidate, "tolist", None)
+    if callable(tolist):
+        candidate = tolist()
+
+    flattened: list[float] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+            for nested in item:
+                visit(nested)
+            return
+        if not isinstance(item, Real):
+            raise TypeError("constraint vector contains a non-numeric value")
+        flattened.append(float(item))
+
+    visit(candidate)
+    return tuple(flattened)
+
+
+def maximum_constraint_violation_from_mpc(mpc: object) -> float | None:
+    """Measure the final do-mpc nonlinear-constraint bound violation.
+
+    Missing, malformed, or non-finite optimizer state returns ``None`` so the
+    feasibility gate fails closed instead of assuming a successful solve.
+    """
+
+    try:
+        values = _numeric_vector(getattr(mpc, "opt_g_num"))
+        lower_source = getattr(mpc, "lb_opt_g", None)
+        if lower_source is None:
+            lower_source = getattr(mpc, "nlp_cons_lb")
+        upper_source = getattr(mpc, "ub_opt_g", None)
+        if upper_source is None:
+            upper_source = getattr(mpc, "nlp_cons_ub")
+        lower = _numeric_vector(lower_source)
+        upper = _numeric_vector(upper_source)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not values or len(values) != len(lower) or len(values) != len(upper):
+        return None
+    violation = 0.0
+    for value, low, high in zip(values, lower, upper):
+        if not isfinite(value):
+            return None
+        if isfinite(low):
+            violation = max(violation, low - value)
+        if isfinite(high):
+            violation = max(violation, value - high)
+    return max(0.0, violation)
+
+
+def diagnostics_from_do_mpc(
+    mpc: object, *, measured_solve_time: float | None = None
+) -> SolverDiagnostics:
+    """Build fail-closed diagnostics from one completed do-mpc solve."""
+
+    stats = getattr(mpc, "solver_stats", {})
+    if not isinstance(stats, Mapping):
+        stats = {}
+    diagnostics = diagnostics_from_stats(
+        stats,
+        constraint_violation=maximum_constraint_violation_from_mpc(mpc),
+    )
+    measured = _optional_finite_float(measured_solve_time)
+    if measured is None:
+        return diagnostics
+    return SolverDiagnostics(
+        termination=diagnostics.termination,
+        raw_status=diagnostics.raw_status,
+        solver_success=diagnostics.solver_success,
+        constraint_violation=diagnostics.constraint_violation,
+        iterations=diagnostics.iterations,
+        objective=diagnostics.objective,
+        solve_time=measured,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FeasibilityPolicy:
     """Fail-closed policy deciding whether an MPC action may reach the robot."""

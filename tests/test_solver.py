@@ -11,10 +11,26 @@ from lampc_cbf.solver import (
     SolverDiagnostics,
     Termination,
     diagnostics_from_stats,
+    diagnostics_from_do_mpc,
+    maximum_constraint_violation_from_mpc,
     normalize_termination,
     safe_control_or_none,
     solve_ipopt_smoke_problem,
 )
+
+
+class _FakeMpc:
+    solver_stats = {"return_status": "Solve_Succeeded", "success": True}
+    opt_g_num = [0.0, 1.2, -0.1]
+    lb_opt_g = [-float("inf"), 0.0, 0.0]
+    ub_opt_g = [0.0, 1.0, float("inf")]
+
+
+def test_do_mpc_constraint_violation_is_measured_against_both_bounds() -> None:
+    assert maximum_constraint_violation_from_mpc(_FakeMpc()) == pytest.approx(0.2)
+    result = diagnostics_from_do_mpc(_FakeMpc(), measured_solve_time=0.04)
+    assert result.constraint_violation == pytest.approx(0.2)
+    assert result.solve_time == pytest.approx(0.04)
 
 
 def diagnostics(

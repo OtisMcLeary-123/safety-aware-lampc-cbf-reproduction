@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 import importlib
 import random
+from math import isfinite, sqrt
 from typing import Any
 
 from .types import ControlInput, Obstacle, RobotState
@@ -20,6 +21,48 @@ Observation = Any
 StateExtractor = Callable[[Observation], Sequence[float]]
 ObstacleExtractor = Callable[[Observation], Sequence[Obstacle | Mapping[str, Any] | Sequence[float]]]
 ActionMapper = Callable[[tuple[float, float, float, float]], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class SimulatorCalibrationSample:
+    """One-step mismatch between the paper model and Safe Panda motion."""
+
+    model_transition_error: float
+    action_tracking_error: float
+
+
+def simulator_calibration_sample(
+    previous_position: Sequence[float],
+    next_position: Sequence[float],
+    model_velocity: Sequence[float],
+    commanded_velocity: Sequence[float],
+    dt: float,
+) -> SimulatorCalibrationSample:
+    """Compare observed Cartesian motion with model-state and action predictions."""
+
+    vectors = (
+        tuple(float(value) for value in previous_position),
+        tuple(float(value) for value in next_position),
+        tuple(float(value) for value in model_velocity),
+        tuple(float(value) for value in commanded_velocity),
+    )
+    if any(len(vector) != 3 for vector in vectors):
+        raise ValueError("calibration inputs must be 3-vectors")
+    if not isfinite(dt) or dt <= 0.0 or not all(
+        isfinite(value) for vector in vectors for value in vector
+    ):
+        raise ValueError("calibration inputs and dt must be finite; dt must be positive")
+    previous, observed, model, commanded = vectors
+
+    def error(velocity: tuple[float, ...]) -> float:
+        return sqrt(
+            sum(
+                (actual - (prior + dt * speed)) ** 2
+                for prior, actual, speed in zip(previous, observed, velocity)
+            )
+        )
+
+    return SimulatorCalibrationSample(error(model), error(commanded))
 
 
 class SafePandaDependencyError(RuntimeError):

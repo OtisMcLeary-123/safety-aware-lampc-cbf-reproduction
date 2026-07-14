@@ -12,6 +12,14 @@ def test_smooth_dynamic_configuration_validates_weights() -> None:
         SmoothDynamicConfig(jerk_weight=-0.1)
 
 
+def test_dynamic_configuration_accepts_velocity_only_and_direct_target():
+    config = SmoothDynamicConfig(
+        prediction_mode="velocity", reference_mode="direct_target"
+    )
+    assert config.prediction_mode == "velocity"
+    assert config.reference_mode == "direct_target"
+
+
 def test_reference_progress_is_monotone() -> None:
     path = np.column_stack(
         [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]

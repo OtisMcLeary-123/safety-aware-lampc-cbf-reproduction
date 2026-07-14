@@ -20,6 +20,17 @@ def test_default_protocol_has_500_common_conditions_and_isolates_feedback():
     assert feedback.optimal_decay_weight == fixed.optimal_decay_weight
 
 
+def test_protocol_separates_paper_fidelity_from_robust_extension():
+    paper = next(method for method in METHODS if method.name == "proactive_cbf_static_g002")
+    robust = next(method for method in METHODS if method.name == "predictive_reflex_g002")
+    assert paper.experiment_profile == "paper_fidelity"
+    assert paper.delta_u_weight == pytest.approx(0.5)
+    assert paper.reference_mode == "direct_target"
+    assert robust.experiment_profile == "robust_extension"
+    assert robust.delta_u_weight == pytest.approx(2.0)
+    assert robust.reference_mode == "straight"
+
+
 def test_exact_mcnemar_handles_ties_and_one_sided_discordance():
     assert exact_mcnemar_pvalue([True, False], [True, False]) == 1.0
     assert exact_mcnemar_pvalue([False] * 6, [True] * 6) == pytest.approx(0.03125)

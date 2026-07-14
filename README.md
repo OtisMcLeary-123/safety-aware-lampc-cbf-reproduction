@@ -225,6 +225,7 @@ python scripts/render_build_l_scene.py
 |---|---|---|
 | Language-guided pick-and-place | `scripts/run_language_guided_pick_place.py` | [Results](docs/LANGUAGE_GUIDED_PICK_PLACE.md) |
 | 500-condition paired benchmark | `scripts/run_paired_benchmark.py` | [Claim reassessment](docs/CLAIM_REASSESSMENT_500.md) |
+| Proactive-CBF/feedback protocol v2 | `scripts/run_paired_benchmark.py --stage smoke` | [Protocol v2](docs/PROACTIVE_CBF_ONLINE_FEEDBACK_PROTOCOL_V2.md) |
 | Hard dynamic scene | `scripts/run_hard_scene_study.py` | [50-episode study](docs/HARD_SCENE_STUDY.md) |
 | Language alignment | `scripts/run_nvidia_nim_alignment_smoke.py` | [N2-A1 report](docs/LANGUAGE_ALIGNMENT_N2A1.md) |
 | Hugging Face/NIM integration | `scripts/run_hf_configured_mpc_cbf.py` | [LLM integration](docs/HF_LLM_INTEGRATION.md) |

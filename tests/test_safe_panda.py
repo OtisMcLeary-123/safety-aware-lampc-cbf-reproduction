@@ -9,7 +9,20 @@ from lampc_cbf.safe_panda import (
     SafePandaConfig,
     SafePandaDependencyError,
     make_safe_panda,
+    simulator_calibration_sample,
 )
+
+
+def test_simulator_calibration_separates_model_and_action_error() -> None:
+    sample = simulator_calibration_sample(
+        (0.0, 0.0, 0.0),
+        (0.01, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.25, 0.0, 0.0),
+        0.04,
+    )
+    assert sample.model_transition_error == pytest.approx(0.01)
+    assert sample.action_tracking_error == pytest.approx(0.0)
 from lampc_cbf.types import ControlInput
 
 

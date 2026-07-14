@@ -28,8 +28,10 @@ class PairedBenchmarkConfig:
     lateral_upper: float = 0.080
     intervention_time_lower: float = 0.0
     intervention_time_upper: float = 0.40
-    output_dir: str = "artifacts/paired_benchmark_500"
+    output_dir: str = "artifacts/paired_benchmark_protocol_v2_500"
     resume: bool = True
+    feedback_schedule_mode: str = "ttc"
+    feedback_ttc_threshold: float = 1.5
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.bootstrap_resamples < 1:
@@ -42,6 +44,10 @@ class PairedBenchmarkConfig:
             raise ValueError("invalid lateral-offset interval")
         if not 0.0 <= self.intervention_time_lower <= self.intervention_time_upper:
             raise ValueError("invalid intervention-time interval")
+        if self.feedback_schedule_mode not in {"elapsed_time", "ttc"}:
+            raise ValueError("feedback_schedule_mode must be elapsed_time or ttc")
+        if self.feedback_ttc_threshold <= 0.0:
+            raise ValueError("feedback_ttc_threshold must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,24 +60,57 @@ class BenchmarkMethod:
     optimal_decay_weight: float = 0.0
     online_feedback: bool = False
     comparator: str = "fixed_cbf_static_g015"
+    experiment_profile: str = "paper_fidelity"
+    delta_u_weight: float = 0.5
+    reference_mode: str = "direct_target"
+    provisional_local_feedback: bool = False
 
 
 METHODS: tuple[BenchmarkMethod, ...] = (
     BenchmarkMethod("distance_static", "distance", 0.15, "static", False),
     BenchmarkMethod("fixed_cbf_static_g015", "cbf", 0.15, "static", False),
     BenchmarkMethod("proactive_cbf_static_g002", "cbf", 0.02, "static", False),
-    BenchmarkMethod("predictive_cbf_g002", "cbf", 0.02, "velocity_tube", False),
-    BenchmarkMethod("predictive_reflex_g002", "cbf", 0.02, "velocity_tube", True),
     BenchmarkMethod(
-        "optimal_decay_predictive_g002", "cbf", 0.02, "velocity_tube", False, 10.0
+        "robust_static_g002", "cbf", 0.02, "static", False,
+        comparator="robust_static_g002",
+        experiment_profile="robust_extension", delta_u_weight=2.0,
+        reference_mode="straight",
+    ),
+    BenchmarkMethod(
+        "predictive_velocity_g002", "cbf", 0.02, "velocity", False,
+        comparator="robust_static_g002",
+        experiment_profile="robust_extension", delta_u_weight=2.0,
+        reference_mode="straight",
+    ),
+    BenchmarkMethod(
+        "predictive_cbf_g002", "cbf", 0.02, "velocity_tube", False,
+        comparator="predictive_velocity_g002",
+        experiment_profile="robust_extension", delta_u_weight=2.0,
+        reference_mode="straight",
+    ),
+    BenchmarkMethod(
+        "predictive_reflex_g002", "cbf", 0.02, "velocity_tube", True,
+        comparator="predictive_cbf_g002",
+        experiment_profile="robust_extension", delta_u_weight=2.0,
+        reference_mode="straight",
+    ),
+    BenchmarkMethod(
+        "optimal_decay_predictive_g002", "cbf", 0.02, "velocity_tube", False, 10.0,
+        comparator="predictive_cbf_g002",
+        experiment_profile="robust_extension", delta_u_weight=2.0,
+        reference_mode="straight",
     ),
     BenchmarkMethod(
         "robust_stack_fixed_g015", "cbf", 0.15, "velocity_tube", True, 10.0,
-        comparator="fixed_cbf_static_g015",
+        comparator="robust_stack_fixed_g015",
+        experiment_profile="robust_extension", delta_u_weight=2.0,
+        reference_mode="straight",
     ),
     BenchmarkMethod(
         "robust_stack_async_feedback", "cbf", 0.15, "velocity_tube", True, 10.0,
         online_feedback=True, comparator="robust_stack_fixed_g015",
+        experiment_profile="robust_extension", delta_u_weight=2.0,
+        reference_mode="straight", provisional_local_feedback=True,
     ),
 )
 
@@ -142,23 +181,43 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     max_steps = int(payload["max_steps"])
     feedback_gamma = float(payload["feedback_gamma"])
     feedback_latency = float(payload["feedback_latency"])
+    feedback_schedule_mode = str(payload.get("feedback_schedule_mode", "ttc"))
+    feedback_ttc_threshold = float(payload.get("feedback_ttc_threshold", 1.5))
     rows: list[dict[str, Any]] = []
     for method in METHODS:
         schedule: tuple[tuple[float, float], ...] = ()
         if method.online_feedback:
-            schedule = ((condition["intervention_time"] + feedback_latency, feedback_gamma),)
+            if feedback_schedule_mode == "elapsed_time":
+                schedule = ((condition["intervention_time"] + feedback_latency, feedback_gamma),)
         config = SmoothDynamicConfig(
-            delta_u_weight=2.0,
+            delta_u_weight=method.delta_u_weight,
             gamma=method.gamma,
             seed=int(condition["seed"]),
             max_steps=max_steps,
             reference_speed=0.08,
-            reference_mode="straight",
+            reference_mode=method.reference_mode,
             safety_mode=method.safety_mode,
             prediction_mode=method.prediction_mode,
             safety_reflex_enabled=method.safety_reflex_enabled,
             optimal_decay_weight=method.optimal_decay_weight,
             gamma_schedule=schedule,
+            provisional_feedback_times=(
+                (condition["intervention_time"],)
+                if method.provisional_local_feedback
+                and feedback_schedule_mode == "elapsed_time"
+                else ()
+            ),
+            feedback_ttc_threshold=(
+                feedback_ttc_threshold
+                if method.online_feedback and feedback_schedule_mode == "ttc"
+                else None
+            ),
+            feedback_response_latency=feedback_latency,
+            feedback_gamma=(
+                feedback_gamma
+                if method.online_feedback and feedback_schedule_mode == "ttc"
+                else None
+            ),
             gamma_update_ttl=1.0,
             obstacle_start_offset=(condition["lateral_offset"], 0.44, 0.0),
             obstacle_velocity=(0.0, -condition["obstacle_speed"], 0.0),
@@ -173,6 +232,8 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 **condition,
                 "method": method.name,
                 "comparator": method.comparator,
+                "experiment_profile": method.experiment_profile,
+                "outcome": result.outcome,
                 "success": bool(result.reached_goal and not result.collision),
                 "reached_goal": result.reached_goal,
                 "collision": result.collision,
@@ -191,6 +252,20 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "minimum_optimal_decay": result.minimum_optimal_decay,
                 "avoidance_onset_time": result.avoidance_onset_time,
                 "minimum_predicted_ttc": result.minimum_predicted_ttc,
+                "feedback_latency": feedback_latency if method.online_feedback else 0.0,
+                "feedback_schedule_mode": feedback_schedule_mode,
+                "feedback_trigger_time": result.feedback_trigger_time,
+                "feedback_available_time": result.feedback_available_time,
+                "feedback_causal_opportunity": result.feedback_causal_opportunity,
+                "solver_failures": result.solver_failures,
+                "solver_rejections": result.solver_rejections,
+                "deadline_misses": result.deadline_misses,
+                "emergency_fallbacks": result.emergency_fallbacks,
+                "maximum_constraint_violation": result.maximum_constraint_violation,
+                "mean_model_transition_error": result.mean_model_transition_error,
+                "max_model_transition_error": result.max_model_transition_error,
+                "mean_action_tracking_error": result.mean_action_tracking_error,
+                "max_action_tracking_error": result.max_action_tracking_error,
                 **result.smoothness.as_dict(),
             }
         )
@@ -203,12 +278,19 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
     with path.open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
     typed: list[dict[str, Any]] = []
-    boolean_fields = {"success", "reached_goal", "collision"}
+    boolean_fields = {
+        "success", "reached_goal", "collision", "feedback_causal_opportunity"
+    }
     integer_fields = {
         "episode", "seed", "steps", "gamma_updates_applied", "gamma_updates_rejected",
         "reflex_interventions", "reflex_backups",
+        "solver_failures", "solver_rejections", "deadline_misses",
+        "emergency_fallbacks",
     }
-    text_fields = {"method", "comparator"}
+    text_fields = {
+        "method", "comparator", "experiment_profile", "outcome",
+        "feedback_schedule_mode",
+    }
     for row in rows:
         parsed: dict[str, Any] = {}
         for key, value in row.items():
@@ -228,8 +310,9 @@ def _write_rows(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     if not rows:
         return
     ordered = sorted(rows, key=lambda row: (int(row["episode"]), str(row["method"])))
+    fieldnames = list(dict.fromkeys(key for row in ordered for key in row))
     with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(ordered[0]))
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(ordered)
 
@@ -289,6 +372,13 @@ def summarize_paired_rows(
             "paired_success_difference_95_ci": list(difference_ci),
             "mcnemar_exact_p": pvalue,
             "collisions": sum(bool(row["collision"]) for row in method_rows),
+            "outcomes": {
+                outcome: sum(row.get("outcome") == outcome for row in method_rows)
+                for outcome in (
+                    "goal", "collision", "timeout", "environment_truncated",
+                    "infeasible_abort", "emergency_fallback",
+                )
+            },
             "mean_minimum_true_clearance": float(np.mean(clearance)),
             "paired_clearance_difference_95_ci": list(clearance_difference_ci),
             "median_avoidance_onset_time": float(np.median([
@@ -309,6 +399,20 @@ def summarize_paired_rows(
             "reflex_backups": sum(int(row["reflex_backups"]) for row in method_rows),
             "mean_optimal_decay": float(np.mean([row["mean_optimal_decay"] for row in method_rows])),
             "minimum_optimal_decay": float(np.min([row["minimum_optimal_decay"] for row in method_rows])),
+            "solver_failures": sum(int(row.get("solver_failures", 0)) for row in method_rows),
+            "solver_rejections": sum(int(row.get("solver_rejections", 0)) for row in method_rows),
+            "deadline_misses": sum(int(row.get("deadline_misses", 0)) for row in method_rows),
+            "emergency_fallbacks": sum(int(row.get("emergency_fallbacks", 0)) for row in method_rows),
+            "feedback_causal_opportunities": sum(
+                bool(row.get("feedback_causal_opportunity", False))
+                for row in method_rows
+            ),
+            "feedback_updates_with_causal_opportunity": sum(
+                bool(row.get("feedback_causal_opportunity", False))
+                and int(row.get("gamma_updates_applied", 0)) > 0
+                for row in method_rows
+            ),
+            "experiment_profile": method.experiment_profile,
         }
     adjusted = _holm_adjust(raw_pvalues)
     for name, value in adjusted.items():
@@ -378,6 +482,8 @@ def run_paired_benchmark(
             "max_steps": cfg.max_steps,
             "feedback_gamma": feedback_decision.gamma,
             "feedback_latency": feedback_decision.latency_seconds,
+            "feedback_schedule_mode": cfg.feedback_schedule_mode,
+            "feedback_ttc_threshold": cfg.feedback_ttc_threshold,
         }
         for condition in conditions
     ]
@@ -400,7 +506,8 @@ def run_paired_benchmark(
                     print(f"[paired] completed {len(complete) + index}/{cfg.episodes}", flush=True)
     summaries = summarize_paired_rows(rows, cfg)
     summary = {
-        "study_id": f"safe-panda-paired-{cfg.episodes}",
+        "study_id": f"safe-panda-paired-protocol-v2-{cfg.episodes}",
+        "protocol_version": 2,
         "config": asdict(cfg),
         "methods": summaries,
         "feedback_decision": feedback_decision.as_dict(),
