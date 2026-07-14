@@ -142,6 +142,27 @@ def test_expired_feedback_window_can_release_after_observed_hazard_clears():
     assert profile.clearance_margin == pytest.approx(0.0)
 
 
+def test_ablation_can_disable_recovery_without_disabling_safety_profile():
+    config = ContextAwareSafetyConfig(
+        clear_hold_time=0.04,
+        recovery_duration=0.04,
+        recovery_enabled=False,
+    )
+    lifecycle = SafetyProfileLifecycle(0.10, config)
+    lifecycle.activate_provisional()
+    lifecycle.accept_validated_update(0.03)
+
+    for _ in range(20):
+        profile = lifecycle.step(predicted_ttc=None, dt=0.04)
+
+    assert lifecycle.state is SafetyProfileState.VALIDATED_CAUTIOUS
+    assert profile.gamma == pytest.approx(0.03)
+    assert profile.speed_scale == pytest.approx(config.cautious_speed_scale)
+    assert profile.clearance_margin == pytest.approx(
+        config.cautious_clearance_margin
+    )
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

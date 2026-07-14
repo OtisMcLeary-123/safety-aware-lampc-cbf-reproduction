@@ -58,6 +58,7 @@ class ContextAwareSafetyConfig:
     exit_ttc_hysteresis: float = 0.50
     clear_hold_time: float = 0.40
     recovery_duration: float = 0.80
+    recovery_enabled: bool = True
 
     def __post_init__(self) -> None:
         _finite_nonnegative(self.emergency_ttc, "emergency_ttc")
@@ -286,7 +287,11 @@ class SafetyProfileLifecycle:
             and float(predicted_ttc)
             > config.cautious_ttc + config.exit_ttc_hysteresis
         )
-        context_clear = solver_feasible and ttc_is_clear
+        context_clear = (
+            self.scheduler.config.recovery_enabled
+            and solver_feasible
+            and ttc_is_clear
+        )
 
         if self.state is SafetyProfileState.RECOVERY:
             if not context_clear:

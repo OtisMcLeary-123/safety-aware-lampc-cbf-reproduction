@@ -39,6 +39,7 @@ class SmoothDynamicConfig:
     velocity_filter: float = 0.5
     robot_velocity_filter: float = 0.5
     robot_velocity_maximum: float = 0.4
+    robot_velocity_feedback_enabled: bool = True
     safety_reflex_enabled: bool = True
     reflex_lookahead_steps: int = 8
     reflex_alpha: float = 4.0
@@ -58,6 +59,7 @@ class SmoothDynamicConfig:
     safety_exit_ttc_hysteresis: float = 0.50
     safety_clear_hold_time: float = 0.40
     safety_recovery_duration: float = 0.80
+    safety_profile_recovery_enabled: bool = True
     stall_progress_threshold: float = 0.01
     provisional_feedback_times: tuple[float, ...] = ()
     feedback_ttc_threshold: float | None = None
@@ -722,6 +724,7 @@ def run_smooth_dynamic_demo(
             exit_ttc_hysteresis=cfg.safety_exit_ttc_hysteresis,
             clear_hold_time=cfg.safety_clear_hold_time,
             recovery_duration=cfg.safety_recovery_duration,
+            recovery_enabled=cfg.safety_profile_recovery_enabled,
         )
         safety_scheduler = ContextAwareSafetyScheduler(safety_config)
         safety_lifecycle = SafetyProfileLifecycle(cfg.gamma, safety_config)
@@ -838,7 +841,12 @@ def run_smooth_dynamic_demo(
             )
             predicted_ttc = constant_velocity_ttc(
                 position - estimated_position,
-                observed_velocity - estimated_velocity,
+                (
+                    observed_velocity
+                    if cfg.robot_velocity_feedback_enabled
+                    else previous_control[:3]
+                )
+                - estimated_velocity,
                 combined_radius,
             )
             if predicted_ttc is not None:
@@ -924,8 +932,13 @@ def run_smooth_dynamic_demo(
                         **asdict(profile),
                     }
                 )
+            feedback_velocity = (
+                observed_velocity
+                if cfg.robot_velocity_feedback_enabled
+                else previous_control[:3]
+            )
             measured_state = np.concatenate(
-                [position, [0.0], observed_velocity, [previous_control[3]]]
+                [position, [0.0], feedback_velocity, [previous_control[3]]]
             )
             if mpc_config.uses_jerk_state:
                 measured_state = np.concatenate([measured_state, previous_increment])
@@ -1046,7 +1059,7 @@ def run_smooth_dynamic_demo(
                         }
                     )
             pre_step_position = position.copy()
-            model_velocity = observed_velocity.copy()
+            model_velocity = feedback_velocity.copy()
             action = paper_control_to_safe_panda_action(
                 candidate, env.action_space.shape[0],
                 linear_input_limit=mpc_config.linear_input_limit,
