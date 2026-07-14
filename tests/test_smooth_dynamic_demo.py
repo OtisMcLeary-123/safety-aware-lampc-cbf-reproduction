@@ -5,7 +5,37 @@ import importlib.util
 import numpy as np
 import pytest
 
-from lampc_cbf.smooth_dynamic_demo import ReferenceObstacleTVP, SmoothDynamicConfig
+from lampc_cbf.smooth_dynamic_demo import (
+    ReferenceObstacleTVP,
+    SmoothDynamicConfig,
+    classify_episode_outcome,
+)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"collision": True}, "collision"),
+        ({"reached_goal": True}, "goal"),
+        ({"truncated": True}, "environment_truncated"),
+        ({"solver_rejections": 100}, "solver_failure"),
+        ({"final_goal_distance": 0.295}, "controller_stall"),
+        ({"final_goal_distance": 0.20}, "safety_timeout"),
+    ],
+)
+def test_episode_outcome_classifies_timeout_cause(kwargs, expected) -> None:
+    inputs = {
+        "reached_goal": False,
+        "collision": False,
+        "truncated": False,
+        "initial_goal_distance": 0.30,
+        "final_goal_distance": 0.20,
+        "solver_rejections": 0,
+        "steps": 100,
+        "stall_progress_threshold": 0.01,
+    }
+    inputs.update(kwargs)
+    assert classify_episode_outcome(**inputs) == expected
 
 
 def test_smooth_dynamic_configuration_validates_weights() -> None:
@@ -28,6 +58,8 @@ def test_dynamic_configuration_validates_robot_velocity_estimator() -> None:
         SmoothDynamicConfig(robot_velocity_filter=1.1)
     with pytest.raises(ValueError, match="robot_velocity_maximum"):
         SmoothDynamicConfig(robot_velocity_maximum=0.0)
+    with pytest.raises(ValueError, match="stall_progress_threshold"):
+        SmoothDynamicConfig(stall_progress_threshold=-0.01)
 
 
 def test_simulation_defaults_to_command_velocity_cbf_transition() -> None:

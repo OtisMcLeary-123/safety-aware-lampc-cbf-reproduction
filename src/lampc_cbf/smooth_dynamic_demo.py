@@ -58,6 +58,7 @@ class SmoothDynamicConfig:
     safety_exit_ttc_hysteresis: float = 0.50
     safety_clear_hold_time: float = 0.40
     safety_recovery_duration: float = 0.80
+    stall_progress_threshold: float = 0.01
     provisional_feedback_times: tuple[float, ...] = ()
     feedback_ttc_threshold: float | None = None
     feedback_response_latency: float = 0.0
@@ -117,6 +118,8 @@ class SmoothDynamicConfig:
             raise ValueError("safety_clear_hold_time must be non-negative")
         if self.safety_recovery_duration <= 0.0:
             raise ValueError("safety_recovery_duration must be positive")
+        if self.stall_progress_threshold < 0.0:
+            raise ValueError("stall_progress_threshold must be non-negative")
         if self.solver_max_constraint_violation < 0.0:
             raise ValueError("solver_max_constraint_violation must be non-negative")
         if self.solver_max_cpu_time <= 0.0:
@@ -156,6 +159,12 @@ class SmoothDynamicResult:
     minimum_true_clearance: float
     minimum_measured_clearance: float
     final_goal_distance: float
+    initial_goal_distance: float
+    net_goal_progress: float
+    mean_goal_progress_rate: float
+    final_speed_scale: float
+    final_clearance_margin: float
+    safety_profile_transitions: int
     mean_solve_time: float
     max_solve_time: float
     p99_solve_time: float
@@ -188,6 +197,33 @@ class SmoothDynamicResult:
     infeasible_stage_events: int
     smoothness: SmoothnessMetrics
     output_dir: str
+
+
+def classify_episode_outcome(
+    *,
+    reached_goal: bool,
+    collision: bool,
+    truncated: bool,
+    initial_goal_distance: float,
+    final_goal_distance: float,
+    solver_rejections: int,
+    steps: int,
+    stall_progress_threshold: float = 0.01,
+) -> str:
+    """Classify terminal cause without treating any progress as success."""
+
+    if collision:
+        return "collision"
+    if reached_goal:
+        return "goal"
+    if truncated:
+        return "environment_truncated"
+    if steps > 0 and solver_rejections >= steps:
+        return "solver_failure"
+    progress = float(initial_goal_distance) - float(final_goal_distance)
+    if progress < stall_progress_threshold:
+        return "controller_stall"
+    return "safety_timeout"
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,6 +586,7 @@ def run_smooth_dynamic_demo(
     solve_times: list[float] = []
     predicted_ttc_values: list[float] = []
     context_profile_trace: list[dict[str, Any]] = []
+    runtime_trace: list[dict[str, Any]] = []
     model_transition_errors: list[float] = []
     action_tracking_errors: list[float] = []
     solver_audits: list[dict[str, Any]] = []
@@ -564,6 +601,7 @@ def run_smooth_dynamic_demo(
         observation, _ = env.reset(seed=cfg.seed)
         start = np.asarray(observation["achieved_goal"], dtype=float)
         goal = start + np.asarray(cfg.goal_offset, dtype=float)
+        initial_goal_distance = float(np.linalg.norm(start - goal))
         true_obstacle = start + np.asarray(cfg.obstacle_start_offset, dtype=float)
         obstacle_velocity = np.asarray(cfg.obstacle_velocity, dtype=float)
         hidden_obstacle = np.array([2.0, 2.0, -1.0])
@@ -687,6 +725,9 @@ def run_smooth_dynamic_demo(
         )
         safety_scheduler = ContextAwareSafetyScheduler(safety_config)
         safety_lifecycle = SafetyProfileLifecycle(cfg.gamma, safety_config)
+        last_lifecycle_state = safety_lifecycle.state
+        safety_profile_transitions = 0
+        hazard_clear_elapsed = 0.0
         feasibility_policy = FeasibilityPolicy(
             max_constraint_violation=cfg.solver_max_constraint_violation
         )
@@ -829,6 +870,20 @@ def run_smooth_dynamic_demo(
                 dt=mpc_config.dt,
                 solver_feasible=last_solver_feasible,
             )
+            if safety_lifecycle.state is not last_lifecycle_state:
+                safety_profile_transitions += 1
+                last_lifecycle_state = safety_lifecycle.state
+            hazard_is_clear = last_solver_feasible and (
+                predicted_ttc is None
+                or predicted_ttc
+                > safety_config.cautious_ttc
+                + safety_config.exit_ttc_hysteresis
+            )
+            hazard_clear_elapsed = (
+                hazard_clear_elapsed + mpc_config.dt
+                if safety_lifecycle.active and hazard_is_clear
+                else 0.0
+            )
             if cfg.context_safety_enabled:
                 context_profile = safety_scheduler.select(
                     predicted_ttc=predicted_ttc,
@@ -946,6 +1001,8 @@ def run_smooth_dynamic_demo(
                 else 1.0
             )
             nominal_candidate = candidate.copy()
+            reflex_intervened = False
+            reflex_backup_used = False
             if (
                 (
                     cfg.safety_reflex_enabled
@@ -974,6 +1031,8 @@ def run_smooth_dynamic_demo(
                     ),
                 )
                 candidate[:3] = reflex_result.velocity
+                reflex_intervened = reflex_result.intervened
+                reflex_backup_used = reflex_result.backup_used
                 if reflex_result.intervened:
                     reflex_audits.append(
                         {
@@ -1021,6 +1080,8 @@ def run_smooth_dynamic_demo(
                 np.linalg.norm(position - measurement) - combined_radius
             )
             goal_distance = float(np.linalg.norm(position - goal))
+            elapsed_after_step = (step_index + 1) * mpc_config.dt
+            net_progress = initial_goal_distance - goal_distance
             if (
                 avoidance_onset_time is None
                 and abs(float(position[0] - start[0])) >= cfg.avoidance_onset_threshold
@@ -1035,6 +1096,26 @@ def run_smooth_dynamic_demo(
             measured_clearances.append(measured_clearance)
             goal_distances.append(goal_distance)
             gamma_trace.append(tvp.gamma)
+            runtime_trace.append(
+                {
+                    "step": step_index,
+                    "time": elapsed,
+                    "lifecycle_state": safety_lifecycle.state.value,
+                    "gamma": tvp.gamma,
+                    "clearance_margin": tvp.clearance_margin,
+                    "speed_scale": tvp.speed_scale,
+                    "predicted_ttc": predicted_ttc,
+                    "hazard_clear_elapsed": hazard_clear_elapsed,
+                    "observed_velocity": observed_velocity.tolist(),
+                    "commanded_velocity": candidate[:3].tolist(),
+                    "goal_distance": goal_distance,
+                    "net_goal_progress": net_progress,
+                    "mean_goal_progress_rate": net_progress / elapsed_after_step,
+                    "reflex_intervened": reflex_intervened,
+                    "reflex_backup_used": reflex_backup_used,
+                    "solver_feasible": last_solver_feasible,
+                }
+            )
             if cfg.save_animation and step_index % cfg.render_stride == 0:
                 frame = env.render()
                 if frame is not None:
@@ -1100,17 +1181,18 @@ def run_smooth_dynamic_demo(
                 append_images=gif_frames[1:], duration=80, loop=0, optimize=True,
             )
 
+        final_goal_distance = float(goal_distances[-1])
+        net_goal_progress = initial_goal_distance - final_goal_distance
         result = SmoothDynamicResult(
-            outcome=(
-                "collision"
-                if collision
-                else "goal"
-                if reached_goal
-                else "environment_truncated"
-                if truncated
-                else "emergency_fallback"
-                if emergency_fallbacks
-                else "timeout"
+            outcome=classify_episode_outcome(
+                reached_goal=reached_goal,
+                collision=collision,
+                truncated=truncated,
+                initial_goal_distance=initial_goal_distance,
+                final_goal_distance=final_goal_distance,
+                solver_rejections=solver_rejections,
+                steps=len(raw_positions),
+                stall_progress_threshold=cfg.stall_progress_threshold,
             ),
             reached_goal=reached_goal,
             collision=collision,
@@ -1118,7 +1200,15 @@ def run_smooth_dynamic_demo(
             sensor_updates=len(sensor_update_steps),
             minimum_true_clearance=float(min(true_clearances)),
             minimum_measured_clearance=float(min(measured_clearances)),
-            final_goal_distance=float(goal_distances[-1]),
+            final_goal_distance=final_goal_distance,
+            initial_goal_distance=initial_goal_distance,
+            net_goal_progress=net_goal_progress,
+            mean_goal_progress_rate=(
+                net_goal_progress / (len(raw_positions) * mpc_config.dt)
+            ),
+            final_speed_scale=tvp.speed_scale,
+            final_clearance_margin=tvp.clearance_margin,
+            safety_profile_transitions=safety_profile_transitions,
             mean_solve_time=float(np.mean(solve_times)),
             max_solve_time=float(np.max(solve_times)),
             p99_solve_time=float(np.quantile(solve_times, 0.99)),
@@ -1187,6 +1277,7 @@ def run_smooth_dynamic_demo(
             "applied_gamma_updates": applied_gamma_updates,
             "gamma_trace": gamma_trace,
             "context_profile_trace": context_profile_trace,
+            "runtime_trace": runtime_trace,
             "solver_audits": solver_audits,
             "positions": raw_positions.tolist(),
             "visual_spline": visual_spline.tolist(),

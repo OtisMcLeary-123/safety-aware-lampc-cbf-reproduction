@@ -129,9 +129,17 @@ def _run_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             {
                 **condition,
                 "variant": variant.name,
+                "outcome": result.outcome,
                 "success": bool(result.reached_goal and not result.collision),
                 "collision": result.collision,
                 "steps": result.steps,
+                "initial_goal_distance": result.initial_goal_distance,
+                "final_goal_distance": result.final_goal_distance,
+                "net_goal_progress": result.net_goal_progress,
+                "mean_goal_progress_rate": result.mean_goal_progress_rate,
+                "final_speed_scale": result.final_speed_scale,
+                "final_clearance_margin": result.final_clearance_margin,
+                "safety_profile_transitions": result.safety_profile_transitions,
                 "minimum_true_clearance": result.minimum_true_clearance,
                 "mean_solve_time": result.mean_solve_time,
                 "max_solve_time": result.max_solve_time,
@@ -173,6 +181,23 @@ def summarize_remediation_rows(
             "episodes": len(selected),
             "success_rate": sum(bool(row["success"]) for row in selected) / len(selected),
             "collision_rate": sum(bool(row["collision"]) for row in selected) / len(selected),
+            "outcomes": {
+                outcome: sum(row["outcome"] == outcome for row in selected)
+                for outcome in (
+                    "goal",
+                    "collision",
+                    "safety_timeout",
+                    "controller_stall",
+                    "solver_failure",
+                    "environment_truncated",
+                )
+            },
+            "mean_final_goal_distance": sum(
+                float(row["final_goal_distance"]) for row in selected
+            ) / len(selected),
+            "mean_net_goal_progress": sum(
+                float(row["net_goal_progress"]) for row in selected
+            ) / len(selected),
             "mean_minimum_true_clearance": sum(
                 float(row["minimum_true_clearance"]) for row in selected
             ) / len(selected),

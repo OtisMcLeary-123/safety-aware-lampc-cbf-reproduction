@@ -241,6 +241,12 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "minimum_true_clearance": result.minimum_true_clearance,
                 "minimum_measured_clearance": result.minimum_measured_clearance,
                 "final_goal_distance": result.final_goal_distance,
+                "initial_goal_distance": result.initial_goal_distance,
+                "net_goal_progress": result.net_goal_progress,
+                "mean_goal_progress_rate": result.mean_goal_progress_rate,
+                "final_speed_scale": result.final_speed_scale,
+                "final_clearance_margin": result.final_clearance_margin,
+                "safety_profile_transitions": result.safety_profile_transitions,
                 "mean_solve_time": result.mean_solve_time,
                 "max_solve_time": result.max_solve_time,
                 "p99_solve_time": result.p99_solve_time,
@@ -296,6 +302,7 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
         "solver_unknown_exits",
         "emergency_fallbacks", "feedback_updates_rejected_late",
         "most_infeasible_stage", "infeasible_stage_events",
+        "safety_profile_transitions",
     }
     text_fields = {
         "method", "comparator", "experiment_profile", "outcome",
@@ -385,8 +392,8 @@ def summarize_paired_rows(
             "outcomes": {
                 outcome: sum(row.get("outcome") == outcome for row in method_rows)
                 for outcome in (
-                    "goal", "collision", "timeout", "environment_truncated",
-                    "infeasible_abort", "emergency_fallback",
+                    "goal", "collision", "safety_timeout", "controller_stall",
+                    "solver_failure", "environment_truncated",
                 )
             },
             "mean_minimum_true_clearance": float(np.mean(clearance)),
