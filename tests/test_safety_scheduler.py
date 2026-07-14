@@ -1,8 +1,11 @@
 import pytest
 
 from lampc_cbf.safety_scheduler import (
+    ContextAwareSafetyConfig,
     ContextAwareSafetyScheduler,
     SafetyProfile,
+    SafetyProfileLifecycle,
+    SafetyProfileState,
     constant_velocity_ttc,
     feedback_has_causal_opportunity,
     feedback_update_deadline,
@@ -53,6 +56,90 @@ def test_infeasible_solver_routes_to_local_reflex_not_stricter_mpc():
     assert profile.emergency
     assert profile.reason == "solver_infeasible_use_local_reflex"
     assert profile.gamma == pytest.approx(0.15)
+
+
+def test_validated_feedback_recovers_runtime_profile_but_retains_gamma():
+    config = ContextAwareSafetyConfig(
+        clear_hold_time=0.08,
+        recovery_duration=0.08,
+        exit_ttc_hysteresis=0.5,
+    )
+    lifecycle = SafetyProfileLifecycle(0.10, config)
+    lifecycle.activate_provisional()
+
+    emergency = lifecycle.step(predicted_ttc=0.8, dt=0.04)
+    assert lifecycle.state is SafetyProfileState.PROVISIONAL
+    assert emergency.speed_scale == pytest.approx(config.emergency_speed_scale)
+
+    lifecycle.accept_validated_update(0.03)
+    assert lifecycle.state is SafetyProfileState.VALIDATED_CAUTIOUS
+    held = lifecycle.step(predicted_ttc=None, dt=0.04)
+    assert held.gamma == pytest.approx(0.03)
+    assert held.speed_scale < 1.0
+
+    lifecycle.step(predicted_ttc=None, dt=0.04)
+    assert lifecycle.state is SafetyProfileState.RECOVERY
+    recovering = lifecycle.step(predicted_ttc=None, dt=0.04)
+    assert config.emergency_speed_scale < recovering.speed_scale < 1.0
+    nominal = lifecycle.step(predicted_ttc=None, dt=0.04)
+
+    assert lifecycle.state is SafetyProfileState.NOMINAL
+    assert nominal.gamma == pytest.approx(0.03)
+    assert nominal.clearance_margin == pytest.approx(0.0)
+    assert nominal.speed_scale == pytest.approx(1.0)
+
+
+def test_ttc_hysteresis_and_solver_failure_prevent_early_release():
+    config = ContextAwareSafetyConfig(
+        clear_hold_time=0.08,
+        recovery_duration=0.08,
+        exit_ttc_hysteresis=0.5,
+    )
+    lifecycle = SafetyProfileLifecycle(0.10, config)
+    lifecycle.activate_provisional()
+
+    lifecycle.step(predicted_ttc=2.9, dt=0.04)
+    lifecycle.step(predicted_ttc=3.1, dt=0.04)
+    lifecycle.step(predicted_ttc=2.9, dt=0.04)
+    lifecycle.step(predicted_ttc=3.1, dt=0.04)
+    assert lifecycle.state is SafetyProfileState.PROVISIONAL
+
+    lifecycle.step(predicted_ttc=3.1, dt=0.04, solver_feasible=False)
+    lifecycle.step(predicted_ttc=3.1, dt=0.04)
+    assert lifecycle.state is SafetyProfileState.PROVISIONAL
+    lifecycle.step(predicted_ttc=3.1, dt=0.04)
+    assert lifecycle.state is SafetyProfileState.RECOVERY
+
+
+def test_hazard_reappearing_during_recovery_returns_to_cautious_state():
+    config = ContextAwareSafetyConfig(clear_hold_time=0.04, recovery_duration=0.20)
+    lifecycle = SafetyProfileLifecycle(0.10, config)
+    lifecycle.activate_provisional()
+    lifecycle.accept_validated_update(0.04)
+    lifecycle.step(predicted_ttc=None, dt=0.04)
+    lifecycle.step(predicted_ttc=None, dt=0.04)
+    assert lifecycle.state is SafetyProfileState.RECOVERY
+
+    profile = lifecycle.step(predicted_ttc=0.7, dt=0.04)
+
+    assert lifecycle.state is SafetyProfileState.VALIDATED_CAUTIOUS
+    assert profile.emergency
+    assert profile.gamma == pytest.approx(0.04)
+    assert profile.speed_scale == pytest.approx(config.emergency_speed_scale)
+
+
+def test_expired_feedback_window_can_release_after_observed_hazard_clears():
+    config = ContextAwareSafetyConfig(clear_hold_time=0.04, recovery_duration=0.04)
+    lifecycle = SafetyProfileLifecycle(0.10, config)
+    lifecycle.activate_provisional()
+
+    lifecycle.step(predicted_ttc=None, dt=0.04)
+    assert lifecycle.state is SafetyProfileState.RECOVERY
+    profile = lifecycle.step(predicted_ttc=None, dt=0.04)
+
+    assert lifecycle.state is SafetyProfileState.NOMINAL
+    assert profile.speed_scale == pytest.approx(1.0)
+    assert profile.clearance_margin == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(

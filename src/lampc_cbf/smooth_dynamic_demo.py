@@ -53,6 +53,9 @@ class SmoothDynamicConfig:
     gamma_update_ttl: float = 1.0
     context_safety_enabled: bool = False
     requested_safety_level: int = 3
+    safety_exit_ttc_hysteresis: float = 0.50
+    safety_clear_hold_time: float = 0.40
+    safety_recovery_duration: float = 0.80
     provisional_feedback_times: tuple[float, ...] = ()
     feedback_ttc_threshold: float | None = None
     feedback_response_latency: float = 0.0
@@ -102,6 +105,12 @@ class SmoothDynamicConfig:
             )
         if not 1 <= self.requested_safety_level <= 5:
             raise ValueError("requested_safety_level must be in [1, 5]")
+        if self.safety_exit_ttc_hysteresis < 0.0:
+            raise ValueError("safety_exit_ttc_hysteresis must be non-negative")
+        if self.safety_clear_hold_time < 0.0:
+            raise ValueError("safety_clear_hold_time must be non-negative")
+        if self.safety_recovery_duration <= 0.0:
+            raise ValueError("safety_recovery_duration must be positive")
         if self.solver_max_constraint_violation < 0.0:
             raise ValueError("solver_max_constraint_violation must be non-negative")
         if self.solver_max_cpu_time <= 0.0:
@@ -493,7 +502,10 @@ def run_smooth_dynamic_demo(
         SafetyReflexConfig,
     )
     from .safety_scheduler import (
+        ContextAwareSafetyConfig,
         ContextAwareSafetyScheduler,
+        SafetyProfile,
+        SafetyProfileLifecycle,
         constant_velocity_ttc,
         feedback_has_causal_opportunity,
         feedback_update_deadline,
@@ -656,12 +668,18 @@ def run_smooth_dynamic_demo(
         reflex_audits: list[dict[str, Any]] = []
         optimal_decay_trace: list[float] = []
         avoidance_onset_time: float | None = None
-        safety_scheduler = ContextAwareSafetyScheduler()
+        safety_config = ContextAwareSafetyConfig(
+            exit_ttc_hysteresis=cfg.safety_exit_ttc_hysteresis,
+            clear_hold_time=cfg.safety_clear_hold_time,
+            recovery_duration=cfg.safety_recovery_duration,
+        )
+        safety_scheduler = ContextAwareSafetyScheduler(safety_config)
+        safety_lifecycle = SafetyProfileLifecycle(cfg.gamma, safety_config)
         feasibility_policy = FeasibilityPolicy(
             max_constraint_violation=cfg.solver_max_constraint_violation
         )
         provisional_index = 0
-        provisional_safety_active = False
+        last_solver_feasible = True
         ttc_feedback_trigger_time: float | None = None
         ttc_feedback_available_time: float | None = None
         ttc_feedback_published = False
@@ -676,7 +694,7 @@ def run_smooth_dynamic_demo(
                 provisional_index < len(cfg.provisional_feedback_times)
                 and elapsed + 1e-12 >= cfg.provisional_feedback_times[provisional_index]
             ):
-                provisional_safety_active = True
+                safety_lifecycle.activate_provisional()
                 provisional_index += 1
             if (
                 ttc_feedback_available_time is not None
@@ -732,10 +750,9 @@ def run_smooth_dynamic_demo(
             feedback_updates_rejected_late += gamma_audit.rejected_expired
             if gamma_audit.applied is not None:
                 tvp.update_gamma(gamma_audit.applied.gamma)
-                # The deterministic provisional profile protects the latency
-                # window only. Once a validated update arrives, hand control
-                # back to the updated MPC parameter.
-                provisional_safety_active = False
+                safety_lifecycle.accept_validated_update(
+                    gamma_audit.applied.gamma
+                )
                 applied_gamma_updates.append(
                     {
                         "scheduled_time": gamma_audit.applied.created_at,
@@ -792,14 +809,40 @@ def run_smooth_dynamic_demo(
                     cfg.gamma_update_ttl,
                     reaction_margin=cfg.feedback_reaction_margin,
                 )
-                provisional_safety_active = True
-            if cfg.context_safety_enabled or provisional_safety_active:
-                profile = safety_scheduler.select(
+                safety_lifecycle.activate_provisional()
+
+            lifecycle_was_active = safety_lifecycle.active
+            lifecycle_profile = safety_lifecycle.step(
+                predicted_ttc=predicted_ttc,
+                dt=mpc_config.dt,
+                solver_feasible=last_solver_feasible,
+            )
+            if cfg.context_safety_enabled:
+                context_profile = safety_scheduler.select(
                     predicted_ttc=predicted_ttc,
-                    requested_safety_level=(
-                        1 if provisional_safety_active else cfg.requested_safety_level
+                    requested_safety_level=cfg.requested_safety_level,
+                    solver_feasible=last_solver_feasible,
+                )
+                profile = SafetyProfile(
+                    gamma=min(context_profile.gamma, lifecycle_profile.gamma),
+                    clearance_margin=max(
+                        context_profile.clearance_margin,
+                        lifecycle_profile.clearance_margin,
+                    ),
+                    speed_scale=min(
+                        context_profile.speed_scale,
+                        lifecycle_profile.speed_scale,
+                    ),
+                    emergency=context_profile.emergency
+                    or lifecycle_profile.emergency,
+                    reason=(
+                        f"context:{context_profile.reason};"
+                        f"lifecycle:{lifecycle_profile.reason}"
                     ),
                 )
+            else:
+                profile = lifecycle_profile
+            if cfg.context_safety_enabled or lifecycle_was_active:
                 tvp.update_safety_profile(
                     gamma=profile.gamma,
                     clearance_margin=profile.clearance_margin,
@@ -810,6 +853,7 @@ def run_smooth_dynamic_demo(
                         "step": step_index,
                         "time": elapsed,
                         "predicted_ttc": predicted_ttc,
+                        "lifecycle_state": safety_lifecycle.state.value,
                         **asdict(profile),
                     }
                 )
@@ -847,6 +891,7 @@ def run_smooth_dynamic_demo(
             if diagnostics.constraint_violation is not None:
                 constraint_violations.append(diagnostics.constraint_violation)
             rejected_candidate = accepted is None
+            last_solver_feasible = not rejected_candidate
             if rejected_candidate:
                 solver_rejections += 1
                 emergency_fallbacks += 1
@@ -890,7 +935,7 @@ def run_smooth_dynamic_demo(
             if (
                 (
                     cfg.safety_reflex_enabled
-                    or provisional_safety_active
+                    or safety_lifecycle.requires_reflex
                     or rejected_candidate
                 )
                 and cfg.safety_mode != "none"

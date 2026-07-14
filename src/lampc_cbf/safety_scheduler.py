@@ -9,6 +9,7 @@ an optimizer, or the simulator.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from math import isfinite, sqrt
 from typing import Sequence
 
@@ -54,11 +55,18 @@ class ContextAwareSafetyConfig:
     emergency_speed_scale: float = 0.35
     cautious_speed_scale: float = 0.65
     reaction_margin: float = 0.20
+    exit_ttc_hysteresis: float = 0.50
+    clear_hold_time: float = 0.40
+    recovery_duration: float = 0.80
 
     def __post_init__(self) -> None:
         _finite_nonnegative(self.emergency_ttc, "emergency_ttc")
         _finite_nonnegative(self.cautious_ttc, "cautious_ttc")
         _finite_nonnegative(self.reaction_margin, "reaction_margin")
+        _finite_nonnegative(self.exit_ttc_hysteresis, "exit_ttc_hysteresis")
+        _finite_nonnegative(self.clear_hold_time, "clear_hold_time")
+        if not isfinite(self.recovery_duration) or self.recovery_duration <= 0.0:
+            raise ValueError("recovery_duration must be finite and positive")
         if self.emergency_ttc >= self.cautious_ttc:
             raise ValueError("emergency_ttc must be smaller than cautious_ttc")
         SafetyProfile(
@@ -184,3 +192,155 @@ class ContextAwareSafetyScheduler:
                 "ttc_or_language_caution",
             )
         return SafetyProfile(self.config.nominal_gamma, reason="nominal_context")
+
+
+class SafetyProfileState(str, Enum):
+    """Lifecycle states for a latency-protecting local safety profile."""
+
+    NOMINAL = "nominal"
+    PROVISIONAL = "provisional"
+    VALIDATED_CAUTIOUS = "validated_cautious"
+    RECOVERY = "recovery"
+
+
+class SafetyProfileLifecycle:
+    """Prevent provisional speed and clearance settings from becoming sticky.
+
+    Gamma is a semantic optimizer parameter and is retained after a validated
+    update.  Clearance margin and speed scale are local runtime protections:
+    they remain fail-safe while a hazard is active, then recover gradually
+    after a hysteretic clear interval.
+    """
+
+    def __init__(
+        self,
+        initial_gamma: float,
+        config: ContextAwareSafetyConfig | None = None,
+    ) -> None:
+        self.scheduler = ContextAwareSafetyScheduler(config)
+        SafetyProfile(initial_gamma)
+        self.semantic_gamma = float(initial_gamma)
+        self.state = SafetyProfileState.NOMINAL
+        self._validated = False
+        self._clear_elapsed = 0.0
+        self._recovery_elapsed = 0.0
+        self._recovery_start_margin = 0.0
+        self._recovery_start_speed = 1.0
+        self._current_profile = SafetyProfile(
+            self.semantic_gamma, reason="lifecycle_nominal"
+        )
+
+    @property
+    def active(self) -> bool:
+        return self.state is not SafetyProfileState.NOMINAL
+
+    @property
+    def requires_reflex(self) -> bool:
+        return self.state in {
+            SafetyProfileState.PROVISIONAL,
+            SafetyProfileState.VALIDATED_CAUTIOUS,
+        }
+
+    @property
+    def profile(self) -> SafetyProfile:
+        return self._current_profile
+
+    def activate_provisional(self) -> None:
+        """Start a new local protection window for pending language feedback."""
+
+        self.state = SafetyProfileState.PROVISIONAL
+        self._validated = False
+        self._clear_elapsed = 0.0
+        self._recovery_elapsed = 0.0
+
+    def accept_validated_update(self, gamma: float) -> None:
+        """Retain a validated semantic gamma without retaining runtime limits."""
+
+        SafetyProfile(gamma)
+        self.semantic_gamma = float(gamma)
+        if self.active:
+            self._validated = True
+            if self.state is not SafetyProfileState.RECOVERY:
+                self.state = SafetyProfileState.VALIDATED_CAUTIOUS
+
+    def step(
+        self,
+        *,
+        predicted_ttc: float | None,
+        dt: float,
+        solver_feasible: bool = True,
+    ) -> SafetyProfile:
+        """Advance the deterministic lifecycle by one controller timestep."""
+
+        if not isfinite(dt) or dt <= 0.0:
+            raise ValueError("dt must be finite and positive")
+        if self.state is SafetyProfileState.NOMINAL:
+            self._current_profile = SafetyProfile(
+                self.semantic_gamma, reason="lifecycle_nominal"
+            )
+            return self._current_profile
+
+        config = self.scheduler.config
+        ttc_is_clear = predicted_ttc is None or (
+            isfinite(float(predicted_ttc))
+            and float(predicted_ttc)
+            > config.cautious_ttc + config.exit_ttc_hysteresis
+        )
+        context_clear = solver_feasible and ttc_is_clear
+
+        if self.state is SafetyProfileState.RECOVERY:
+            if not context_clear:
+                self.state = (
+                    SafetyProfileState.VALIDATED_CAUTIOUS
+                    if self._validated
+                    else SafetyProfileState.PROVISIONAL
+                )
+                self._clear_elapsed = 0.0
+                self._recovery_elapsed = 0.0
+            else:
+                self._recovery_elapsed += dt
+                progress = min(1.0, self._recovery_elapsed / config.recovery_duration)
+                margin = self._recovery_start_margin * (1.0 - progress)
+                speed = self._recovery_start_speed + (
+                    1.0 - self._recovery_start_speed
+                ) * progress
+                if progress >= 1.0:
+                    self.state = SafetyProfileState.NOMINAL
+                    margin = 0.0
+                    speed = 1.0
+                self._current_profile = SafetyProfile(
+                    self.semantic_gamma,
+                    clearance_margin=margin,
+                    speed_scale=speed,
+                    reason=(
+                        "lifecycle_nominal"
+                        if self.state is SafetyProfileState.NOMINAL
+                        else "hazard_clear_recovery"
+                    ),
+                )
+                return self._current_profile
+
+        local_profile = self.scheduler.select(
+            predicted_ttc=predicted_ttc,
+            requested_safety_level=1,
+            solver_feasible=solver_feasible,
+        )
+        runtime_gamma = self.semantic_gamma if self._validated else local_profile.gamma
+        self._current_profile = SafetyProfile(
+            runtime_gamma,
+            clearance_margin=local_profile.clearance_margin,
+            speed_scale=local_profile.speed_scale,
+            emergency=local_profile.emergency,
+            reason=local_profile.reason,
+        )
+
+        if context_clear:
+            self._clear_elapsed += dt
+            if self._clear_elapsed + 1e-12 >= config.clear_hold_time:
+                self.state = SafetyProfileState.RECOVERY
+                self._recovery_elapsed = 0.0
+                self._recovery_start_margin = self._current_profile.clearance_margin
+                self._recovery_start_speed = self._current_profile.speed_scale
+        else:
+            self._clear_elapsed = 0.0
+        return self._current_profile
