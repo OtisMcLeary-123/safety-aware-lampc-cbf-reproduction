@@ -150,6 +150,35 @@ def test_projection_handles_multiple_obstacles_and_speed_bound():
     assert violation <= 1e-9
 
 
+def test_collision_cone_distinguishes_approaching_and_receding_motion():
+    reflex = _reflex(barrier_mode="collision_cone")
+    obstacle = ReflexObstacle((1.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.1)
+
+    approaching = reflex.collision_cone_residual(
+        (0.0, 0.0, 0.0), (0.2, 0.0, 0.0), obstacle
+    )
+    receding = reflex.collision_cone_residual(
+        (0.0, 0.0, 0.0), (-0.2, 0.0, 0.0), obstacle
+    )
+
+    assert approaching < 0.0
+    assert receding > 0.0
+
+
+def test_collision_cone_projection_is_safe_and_minimally_changes_nominal():
+    reflex = _reflex(barrier_mode="collision_cone")
+    obstacle = ReflexObstacle((0.2, 0.0, 0.0), (0.0, 0.0, 0.0), 0.05)
+    nominal = (0.2, 0.0, 0.0)
+
+    projected, violation = reflex.project((0.0, 0.0, 0.0), nominal, (obstacle,))
+
+    assert violation <= 1e-9
+    assert reflex.collision_cone_residual(
+        (0.0, 0.0, 0.0), projected, obstacle
+    ) >= -1e-9
+    assert sum(value * value for value in projected) ** 0.5 <= 0.2 + 1e-12
+
+
 @pytest.mark.parametrize("radius", [-0.1, float("nan")])
 def test_obstacle_rejects_invalid_radius(radius):
     with pytest.raises(ValueError):

@@ -76,6 +76,7 @@ class SafetyReflexConfig:
     backup_selection: str = "task_consistent"
     committed_backup_enabled: bool = True
     committed_backup_steps: int = 8
+    barrier_mode: str = "radial_cbf"
 
     def __post_init__(self) -> None:
         if not isfinite(self.dt) or self.dt <= 0.0:
@@ -99,6 +100,8 @@ class SafetyReflexConfig:
             )
         if self.committed_backup_steps < 1:
             raise ValueError("committed_backup_steps must be positive")
+        if self.barrier_mode not in {"radial_cbf", "collision_cone"}:
+            raise ValueError("barrier_mode must be radial_cbf or collision_cone")
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,16 +165,140 @@ class OperationalSpaceSafetyReflex:
         h = _dot(displacement, displacement) - obstacle.robust_radius**2
         return 2.0 * _dot(displacement, relative_velocity) + self.config.cbf_alpha * h
 
+    def collision_cone_residual(
+        self, position: Sequence[float], velocity: Sequence[float], obstacle: ReflexObstacle
+    ) -> float:
+        """Evaluate the velocity-obstacle collision-cone barrier.
+
+        A non-negative value places the relative velocity outside the collision
+        cone. The robust obstacle radius already contains measurement and
+        sampled-data uncertainty.
+        """
+
+        point = _vector3(position, "position")
+        command = _vector3(velocity, "velocity")
+        displacement = tuple(a - b for a, b in zip(point, obstacle.position))
+        distance_squared = _dot(displacement, displacement)
+        radius_squared = obstacle.robust_radius**2
+        if distance_squared <= radius_squared:
+            return distance_squared - radius_squared
+        relative_velocity = tuple(
+            a - b for a, b in zip(command, obstacle.velocity)
+        )
+        cone_tangent = sqrt(max(0.0, distance_squared - radius_squared))
+        return (
+            _dot(displacement, relative_velocity)
+            + _norm(relative_velocity) * cone_tangent
+        )
+
+    def barrier_residual(
+        self, position: Sequence[float], velocity: Sequence[float], obstacle: ReflexObstacle
+    ) -> float:
+        if self.config.barrier_mode == "collision_cone":
+            return self.collision_cone_residual(position, velocity, obstacle)
+        return self.cbf_residual(position, velocity, obstacle)
+
+    def _collision_cone_projection_candidates(
+        self,
+        point: Vector3,
+        velocity: Vector3,
+        obstacle: ReflexObstacle,
+    ) -> tuple[Vector3, ...]:
+        displacement = tuple(a - b for a, b in zip(point, obstacle.position))
+        distance = _norm(displacement)
+        if distance <= obstacle.robust_radius + 1e-12:
+            away = _unit(displacement) or (1.0, 0.0, 0.0)
+            return (
+                tuple(self.config.speed_limit * axis for axis in away),
+                (0.0, 0.0, 0.0),
+            )
+        axis = tuple(-value / distance for value in displacement)
+        relative = tuple(a - b for a, b in zip(velocity, obstacle.velocity))
+        axial = _dot(relative, axis)
+        lateral = tuple(value - axial * direction for value, direction in zip(relative, axis))
+        lateral_unit = _unit(lateral)
+        if lateral_unit is None:
+            lateral_unit = _unit(_cross(axis, (0.0, 0.0, 1.0)))
+        if lateral_unit is None:
+            lateral_unit = _unit(_cross(axis, (0.0, 1.0, 0.0)))
+        assert lateral_unit is not None
+        sine = min(1.0, obstacle.robust_radius / distance)
+        cosine = sqrt(max(0.0, 1.0 - sine**2))
+        candidates: list[Vector3] = []
+        for sign in (-1.0, 1.0):
+            boundary = tuple(
+                cosine * forward + sign * sine * side
+                for forward, side in zip(axis, lateral_unit)
+            )
+            magnitude = max(0.0, _dot(relative, boundary))
+            relative_boundary = tuple(magnitude * value for value in boundary)
+            candidates.append(
+                self._limit(
+                    tuple(
+                        obs_speed + rel_speed
+                        for obs_speed, rel_speed in zip(
+                            obstacle.velocity, relative_boundary
+                        )
+                    )
+                )
+            )
+        away = tuple(-value for value in axis)
+        candidates.extend(
+            (
+                self._limit(obstacle.velocity),
+                tuple(self.config.speed_limit * value for value in away),
+            )
+        )
+        return tuple(candidates)
+
     def project(
         self,
         position: Sequence[float],
         nominal_velocity: Sequence[float],
         obstacles: Sequence[ReflexObstacle],
     ) -> tuple[Vector3, float]:
-        """Cyclically project onto all affine CBF half-spaces."""
+        """Project onto radial-CBF half-spaces or collision-cone boundaries."""
 
         point = _vector3(position, "position")
         velocity = self._limit(_vector3(nominal_velocity, "nominal_velocity"))
+        if self.config.barrier_mode == "collision_cone":
+            for _ in range(self.config.projection_passes):
+                changed = False
+                for obstacle in obstacles:
+                    if self.barrier_residual(point, velocity, obstacle) >= -self.config.feasibility_tolerance:
+                        continue
+                    candidates = self._collision_cone_projection_candidates(
+                        point, velocity, obstacle
+                    )
+                    feasible = [
+                        candidate
+                        for candidate in candidates
+                        if self.barrier_residual(point, candidate, obstacle)
+                        >= -self.config.feasibility_tolerance
+                    ]
+                    pool = feasible or list(candidates)
+                    velocity = min(
+                        pool,
+                        key=lambda candidate: (
+                            sum(
+                                (value - target) ** 2
+                                for value, target in zip(candidate, velocity)
+                            ),
+                            -self.barrier_residual(point, candidate, obstacle),
+                            candidate,
+                        ),
+                    )
+                    changed = True
+                if not changed:
+                    break
+            max_violation = max(
+                (
+                    max(0.0, -self.barrier_residual(point, velocity, obstacle))
+                    for obstacle in obstacles
+                ),
+                default=0.0,
+            )
+            return velocity, max_violation
         for _ in range(self.config.projection_passes):
             changed = False
             for obstacle in obstacles:
@@ -197,7 +324,7 @@ class OperationalSpaceSafetyReflex:
             if not changed:
                 break
         max_violation = max(
-            (max(0.0, -self.cbf_residual(point, velocity, obstacle)) for obstacle in obstacles),
+            (max(0.0, -self.barrier_residual(point, velocity, obstacle)) for obstacle in obstacles),
             default=0.0,
         )
         return velocity, max_violation
@@ -237,7 +364,7 @@ class OperationalSpaceSafetyReflex:
         nominal = self._limit(_vector3(nominal_velocity, "nominal_velocity"))
         nominal_clearance = self.rollout_minimum_clearance(position, nominal, obstacles)
         nominal_violation = max(
-            (max(0.0, -self.cbf_residual(position, nominal, obstacle)) for obstacle in obstacles),
+            (max(0.0, -self.barrier_residual(position, nominal, obstacle)) for obstacle in obstacles),
             default=0.0,
         )
         if nominal_clearance >= 0.0 and nominal_violation <= self.config.feasibility_tolerance:
@@ -266,7 +393,7 @@ class OperationalSpaceSafetyReflex:
             )
             committed_violation = max(
                 (
-                    max(0.0, -self.cbf_residual(position, committed, obstacle))
+                    max(0.0, -self.barrier_residual(position, committed, obstacle))
                     for obstacle in obstacles
                 ),
                 default=0.0,
@@ -329,7 +456,7 @@ class OperationalSpaceSafetyReflex:
             clearance = self.rollout_minimum_clearance(point, limited, obstacles)
             violation = max(
                 (
-                    max(0.0, -self.cbf_residual(point, limited, obstacle))
+                    max(0.0, -self.barrier_residual(point, limited, obstacle))
                     for obstacle in obstacles
                 ),
                 default=0.0,

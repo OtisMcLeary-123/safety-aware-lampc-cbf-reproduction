@@ -49,6 +49,7 @@ class SmoothDynamicConfig:
     reflex_backup_selection: str = "task_consistent"
     reflex_committed_backup_enabled: bool = True
     reflex_committed_backup_steps: int = 8
+    reflex_barrier_mode: str = "radial_cbf"
     avoidance_onset_threshold: float = 0.005
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
@@ -118,6 +119,8 @@ class SmoothDynamicConfig:
             raise ValueError("invalid reflex backup selection")
         if self.reflex_committed_backup_steps < 1:
             raise ValueError("reflex committed backup steps must be positive")
+        if self.reflex_barrier_mode not in {"radial_cbf", "collision_cone"}:
+            raise ValueError("invalid reflex barrier mode")
         if self.avoidance_onset_threshold <= 0.0:
             raise ValueError("avoidance_onset_threshold must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
@@ -730,6 +733,7 @@ def run_smooth_dynamic_demo(
                 backup_selection=cfg.reflex_backup_selection,
                 committed_backup_enabled=cfg.reflex_committed_backup_enabled,
                 committed_backup_steps=cfg.reflex_committed_backup_steps,
+                barrier_mode=cfg.reflex_barrier_mode,
             )
         )
         previous_control = np.zeros(4)
