@@ -26,6 +26,9 @@ def test_uncertainty_tube_grows_with_age_and_includes_latency():
     assert tube.latency_bound == pytest.approx(0.016)
     assert tube.inflation(0.0) == pytest.approx(0.031)
     assert tube.inflation(0.6) == pytest.approx(0.052)
+    assert tube.inflation(
+        0.6, velocity_error_bound=tube.initial_velocity_error_bound
+    ) == pytest.approx(0.154)
 
 
 def test_observer_estimates_velocity_and_predicts_from_timestamp():

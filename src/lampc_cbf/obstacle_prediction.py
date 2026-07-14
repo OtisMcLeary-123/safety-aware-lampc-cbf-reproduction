@@ -29,6 +29,7 @@ class UncertaintyTubeConfig:
     measurement_sigma: float = 0.005
     confidence_multiplier: float = 3.0
     velocity_error_bound: float = 0.03
+    initial_velocity_error_bound: float = 0.20
     model_error_growth: float = 0.005
     max_relative_speed: float = 0.4
     total_latency: float = 0.04
@@ -38,6 +39,7 @@ class UncertaintyTubeConfig:
             self.measurement_sigma,
             self.confidence_multiplier,
             self.velocity_error_bound,
+            self.initial_velocity_error_bound,
             self.model_error_growth,
             self.max_relative_speed,
             self.total_latency,
@@ -55,13 +57,25 @@ class UncertaintyTubeConfig:
     def latency_bound(self) -> float:
         return self.max_relative_speed * self.total_latency
 
-    def inflation(self, prediction_age: float) -> float:
+    def inflation(
+        self,
+        prediction_age: float,
+        *,
+        velocity_error_bound: float | None = None,
+    ) -> float:
         """Return radial uncertainty at age ``prediction_age`` in meters."""
 
         age = float(prediction_age)
         if not isfinite(age) or age < 0.0:
             raise ValueError("prediction_age must be finite and non-negative")
-        growth = (self.velocity_error_bound + self.model_error_growth) * age
+        velocity_bound = (
+            self.velocity_error_bound
+            if velocity_error_bound is None
+            else float(velocity_error_bound)
+        )
+        if not isfinite(velocity_bound) or velocity_bound < 0.0:
+            raise ValueError("velocity_error_bound must be finite and non-negative")
+        growth = (velocity_bound + self.model_error_growth) * age
         return self.measurement_bound + self.latency_bound + growth
 
 

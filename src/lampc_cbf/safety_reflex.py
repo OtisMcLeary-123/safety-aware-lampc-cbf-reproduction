@@ -27,6 +27,21 @@ def _norm(vector: Vector3) -> float:
     return sqrt(_dot(vector, vector))
 
 
+def _cross(left: Vector3, right: Vector3) -> Vector3:
+    return (
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    )
+
+
+def _unit(vector: Vector3) -> Vector3 | None:
+    magnitude = _norm(vector)
+    if magnitude <= 1e-12:
+        return None
+    return tuple(value / magnitude for value in vector)  # type: ignore[return-value]
+
+
 @dataclass(frozen=True, slots=True)
 class ReflexObstacle:
     position: Vector3
@@ -207,14 +222,77 @@ class OperationalSpaceSafetyReflex:
                 projected_clearance, violation,
             )
 
-        # A second projection starting from zero is the local backup policy. It
-        # can move away from an approaching obstacle while minimizing motion.
+        # A second projection starting from zero is one backup candidate.  A
+        # stationary fallback is not intrinsically safe for moving obstacles,
+        # so deterministic escape directions are evaluated as well.
         backup, backup_violation = self.project(position, (0.0, 0.0, 0.0), obstacles)
         backup_clearance = self.rollout_minimum_clearance(position, backup, obstacles)
-        if backup_clearance < 0.0 or backup_violation > self.config.feasibility_tolerance:
-            backup = (0.0, 0.0, 0.0)
-            backup_clearance = self.rollout_minimum_clearance(position, backup, obstacles)
+        point = _vector3(position, "position")
+        candidates: list[Vector3] = [backup, projected, (0.0, 0.0, 0.0)]
+        axes: tuple[Vector3, ...] = (
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+        )
+        for obstacle in obstacles:
+            away = _unit(tuple(a - b for a, b in zip(point, obstacle.position)))
+            obstacle_direction = _unit(obstacle.velocity)
+            directions = list(axes)
+            if away is not None:
+                directions.extend((away, tuple(-value for value in away)))
+            if obstacle_direction is not None:
+                directions.extend(
+                    (obstacle_direction, tuple(-value for value in obstacle_direction))
+                )
+                lateral = _unit(_cross(obstacle_direction, (0.0, 0.0, 1.0)))
+                if lateral is not None:
+                    directions.extend((lateral, tuple(-value for value in lateral)))
+            if away is not None and obstacle_direction is not None:
+                lateral = _unit(_cross(away, obstacle_direction))
+                if lateral is not None:
+                    directions.extend((lateral, tuple(-value for value in lateral)))
+            candidates.extend(
+                tuple(self.config.speed_limit * value for value in direction)
+                for direction in directions
+            )
+
+        evaluated: list[tuple[float, float, Vector3]] = []
+        seen: set[tuple[float, float, float]] = set()
+        for candidate in candidates:
+            limited = self._limit(candidate)
+            key = tuple(round(value, 12) for value in limited)
+            if key in seen:
+                continue
+            seen.add(key)
+            clearance = self.rollout_minimum_clearance(point, limited, obstacles)
+            violation = max(
+                (
+                    max(0.0, -self.cbf_residual(point, limited, obstacle))
+                    for obstacle in obstacles
+                ),
+                default=0.0,
+            )
+            evaluated.append((clearance, violation, limited))
+        feasible = [
+            item
+            for item in evaluated
+            if item[0] >= 0.0
+            and item[1] <= self.config.feasibility_tolerance
+        ]
+        if feasible:
+            backup_clearance, backup_violation, backup = max(
+                feasible, key=lambda item: item[0]
+            )
+            reason = "escape_policy"
+        else:
+            backup_clearance, backup_violation, backup = max(
+                evaluated, key=lambda item: (item[0], -item[1], _norm(item[2]))
+            )
+            reason = "best_effort_escape"
         return GatekeeperResult(
-            backup, True, True, "backup_policy", nominal_clearance,
+            backup, True, True, reason, nominal_clearance,
             backup_clearance, backup_violation,
         )

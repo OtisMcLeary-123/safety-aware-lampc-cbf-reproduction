@@ -270,6 +270,7 @@ class SafetyProfileLifecycle:
         predicted_ttc: float | None,
         dt: float,
         solver_feasible: bool = True,
+        robust_clearance: float | None = None,
     ) -> SafetyProfile:
         """Advance the deterministic lifecycle by one controller timestep."""
 
@@ -282,6 +283,18 @@ class SafetyProfileLifecycle:
             return self._current_profile
 
         config = self.scheduler.config
+        if robust_clearance is not None and not isfinite(float(robust_clearance)):
+            raise ValueError("robust_clearance must be finite or None")
+        clearance_is_emergency = (
+            robust_clearance is not None
+            and float(robust_clearance) <= config.emergency_clearance_margin
+        )
+        clearance_is_clear = (
+            robust_clearance is None
+            or float(robust_clearance)
+            > config.cautious_clearance_margin
+            + config.emergency_clearance_margin
+        )
         ttc_is_clear = predicted_ttc is None or (
             isfinite(float(predicted_ttc))
             and float(predicted_ttc)
@@ -291,6 +304,7 @@ class SafetyProfileLifecycle:
             self.scheduler.config.recovery_enabled
             and solver_feasible
             and ttc_is_clear
+            and clearance_is_clear
         )
 
         if self.state is SafetyProfileState.RECOVERY:
@@ -326,7 +340,7 @@ class SafetyProfileLifecycle:
                 return self._current_profile
 
         local_profile = self.scheduler.select(
-            predicted_ttc=predicted_ttc,
+            predicted_ttc=0.0 if clearance_is_emergency else predicted_ttc,
             requested_safety_level=1,
             solver_feasible=solver_feasible,
         )

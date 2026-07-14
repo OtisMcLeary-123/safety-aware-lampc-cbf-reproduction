@@ -128,6 +128,23 @@ def test_hazard_reappearing_during_recovery_returns_to_cautious_state():
     assert profile.speed_scale == pytest.approx(config.emergency_speed_scale)
 
 
+def test_low_robust_clearance_prevents_ttc_none_from_releasing_profile():
+    config = ContextAwareSafetyConfig(clear_hold_time=0.04, recovery_duration=0.04)
+    lifecycle = SafetyProfileLifecycle(0.10, config)
+    lifecycle.activate_provisional()
+    lifecycle.accept_validated_update(0.03)
+
+    profile = lifecycle.step(
+        predicted_ttc=None,
+        robust_clearance=0.01,
+        dt=0.04,
+    )
+
+    assert lifecycle.state is SafetyProfileState.VALIDATED_CAUTIOUS
+    assert profile.emergency
+    assert profile.speed_scale == pytest.approx(config.emergency_speed_scale)
+
+
 def test_expired_feedback_window_can_release_after_observed_hazard_clears():
     config = ContextAwareSafetyConfig(clear_hold_time=0.04, recovery_duration=0.04)
     lifecycle = SafetyProfileLifecycle(0.10, config)

@@ -33,10 +33,11 @@ class SmoothDynamicConfig:
     prediction_mode: str = "velocity_tube"
     confidence_multiplier: float = 3.0
     velocity_error_bound: float = 0.03
+    initial_velocity_error_bound: float = 0.20
     model_error_growth: float = 0.005
     max_relative_speed: float = 0.4
     total_latency: float = 0.04
-    velocity_filter: float = 0.5
+    velocity_filter: float = 1.0
     robot_velocity_filter: float = 0.5
     robot_velocity_maximum: float = 0.4
     robot_velocity_feedback_enabled: bool = True
@@ -98,6 +99,8 @@ class SmoothDynamicConfig:
             raise ValueError("prediction_mode must be static, velocity, or velocity_tube")
         if not 0.0 <= self.velocity_filter <= 1.0:
             raise ValueError("velocity_filter must be in [0, 1]")
+        if not self.initial_velocity_error_bound >= 0.0:
+            raise ValueError("initial_velocity_error_bound must be non-negative")
         if not 0.0 <= self.robot_velocity_filter <= 1.0:
             raise ValueError("robot_velocity_filter must be in [0, 1]")
         if self.robot_velocity_maximum <= 0.0:
@@ -256,7 +259,7 @@ class ReferenceObstacleTVP:
         safety_mode: str = "cbf",
         prediction_mode: str = "velocity_tube",
         tube_config: Any | None = None,
-        velocity_filter: float = 0.5,
+        velocity_filter: float = 1.0,
         direct_target: bool = False,
         cbf_transition_mode: str = "paper_state",
     ) -> None:
@@ -428,12 +431,12 @@ class ReferenceObstacleTVP:
                 self.observer.timestamp + next_age
             )
             tube_now = (
-                self.tube.inflation(stage_age)
+                self.uncertainty_at_age(stage_age)
                 if self.prediction_mode == "velocity_tube"
                 else 0.0
             )
             tube_next = (
-                self.tube.inflation(next_age)
+                self.uncertainty_at_age(next_age)
                 if self.prediction_mode == "velocity_tube"
                 else 0.0
             )
@@ -456,6 +459,18 @@ class ReferenceObstacleTVP:
             ),
             robust_radius=float(robust_radius),
             robust_radius_next=float(robust_radius_next),
+        )
+
+    def uncertainty_at_age(self, prediction_age: float) -> float:
+        """Inflate unknown velocity before the first distinct sensor update."""
+
+        velocity_bound = (
+            self.tube.initial_velocity_error_bound
+            if self.observer.updates < 2
+            else self.tube.velocity_error_bound
+        )
+        return self.tube.inflation(
+            prediction_age, velocity_error_bound=velocity_bound
         )
 
     def configure(self, model: Any, mpc: Any, x: Any, u: Any, ca: Any) -> None:
@@ -659,6 +674,7 @@ def run_smooth_dynamic_demo(
                 measurement_sigma=cfg.measurement_noise_sigma,
                 confidence_multiplier=cfg.confidence_multiplier,
                 velocity_error_bound=cfg.velocity_error_bound,
+                initial_velocity_error_bound=cfg.initial_velocity_error_bound,
                 model_error_growth=cfg.model_error_growth,
                 max_relative_speed=cfg.max_relative_speed,
                 total_latency=cfg.total_latency,
@@ -839,6 +855,17 @@ def run_smooth_dynamic_demo(
                 else (0.0, 0.0, 0.0),
                 dtype=float,
             )
+            prediction_age = max(0.0, elapsed - tvp.observer.timestamp)
+            tube_uncertainty = (
+                tvp.uncertainty_at_age(prediction_age)
+                if cfg.prediction_mode == "velocity_tube"
+                else 0.0
+            )
+            robust_predicted_clearance = float(
+                np.linalg.norm(position - estimated_position)
+                - combined_radius
+                - tube_uncertainty
+            )
             predicted_ttc = constant_velocity_ttc(
                 position - estimated_position,
                 (
@@ -877,15 +904,22 @@ def run_smooth_dynamic_demo(
                 predicted_ttc=predicted_ttc,
                 dt=mpc_config.dt,
                 solver_feasible=last_solver_feasible,
+                robust_clearance=robust_predicted_clearance,
             )
             if safety_lifecycle.state is not last_lifecycle_state:
                 safety_profile_transitions += 1
                 last_lifecycle_state = safety_lifecycle.state
-            hazard_is_clear = last_solver_feasible and (
-                predicted_ttc is None
-                or predicted_ttc
-                > safety_config.cautious_ttc
-                + safety_config.exit_ttc_hysteresis
+            hazard_is_clear = (
+                last_solver_feasible
+                and (
+                    predicted_ttc is None
+                    or predicted_ttc
+                    > safety_config.cautious_ttc
+                    + safety_config.exit_ttc_hysteresis
+                )
+                and robust_predicted_clearance
+                > safety_config.cautious_clearance_margin
+                + safety_config.emergency_clearance_margin
             )
             hazard_clear_elapsed = (
                 hazard_clear_elapsed + mpc_config.dt
@@ -1024,12 +1058,6 @@ def run_smooth_dynamic_demo(
                 )
                 and cfg.safety_mode != "none"
             ):
-                prediction_age = max(0.0, elapsed - tvp.observer.timestamp)
-                uncertainty = (
-                    tvp.tube.inflation(prediction_age)
-                    if cfg.prediction_mode == "velocity_tube"
-                    else 0.0
-                )
                 reflex_result = reflex.gate(
                     position,
                     candidate[:3],
@@ -1037,8 +1065,8 @@ def run_smooth_dynamic_demo(
                         ReflexObstacle(
                             tuple(float(value) for value in estimated_position),
                             tuple(float(value) for value in estimated_velocity),
-                            combined_radius,
-                            uncertainty,
+                            combined_radius + tvp.clearance_margin,
+                            tube_uncertainty,
                             "moving_obstacle",
                         ),
                     ),
@@ -1118,6 +1146,11 @@ def run_smooth_dynamic_demo(
                     "clearance_margin": tvp.clearance_margin,
                     "speed_scale": tvp.speed_scale,
                     "predicted_ttc": predicted_ttc,
+                    "measurement_age": prediction_age,
+                    "tube_uncertainty": tube_uncertainty,
+                    "robust_predicted_clearance": robust_predicted_clearance,
+                    "estimated_obstacle_position": estimated_position.tolist(),
+                    "estimated_obstacle_velocity": estimated_velocity.tolist(),
                     "hazard_clear_elapsed": hazard_clear_elapsed,
                     "observed_velocity": observed_velocity.tolist(),
                     "commanded_velocity": candidate[:3].tolist(),
@@ -1285,6 +1318,13 @@ def run_smooth_dynamic_demo(
                 "mode": cfg.prediction_mode,
                 "bounded_measurement_error_m": tvp.tube.measurement_bound,
                 "latency_inflation_m": tvp.tube.latency_bound,
+                "initial_velocity_error_bound_mps": (
+                    tvp.tube.initial_velocity_error_bound
+                ),
+                "identified_velocity_error_bound_mps": (
+                    tvp.tube.velocity_error_bound
+                ),
+                "velocity_observer_filter": cfg.velocity_filter,
                 "gaussian_noise_is_deterministically_bounded": False,
             },
             "applied_gamma_updates": applied_gamma_updates,

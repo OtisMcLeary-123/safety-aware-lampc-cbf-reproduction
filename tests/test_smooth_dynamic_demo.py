@@ -144,6 +144,35 @@ def test_obstacle_tvp_current_next_indexing_is_contiguous() -> None:
         provider.prediction_at_stage(16)
 
 
+def test_tube_uses_bootstrap_velocity_bound_until_first_distinct_measurement():
+    path = np.column_stack(
+        [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]
+    )
+    provider = ReferenceObstacleTVP(
+        path,
+        (0.0, 1.0, 1.0),
+        reference_speed=0.1,
+        obstacle_radius=0.1,
+        collision_radius=0.035,
+        gamma=0.1,
+        dt=0.04,
+        horizon=15,
+        velocity_filter=1.0,
+    )
+    bootstrap = provider.uncertainty_at_age(0.6)
+    provider.update(
+        (0.0, 0.0, 1.0),
+        (0.0, 0.88, 1.0),
+        control_time=0.6,
+        measurement_time=0.6,
+    )
+    identified = provider.uncertainty_at_age(0.6)
+
+    assert bootstrap > identified
+    assert bootstrap == pytest.approx(0.154)
+    assert identified == pytest.approx(0.052)
+
+
 @pytest.mark.skipif(
     importlib.util.find_spec("casadi") is None,
     reason="CasADi is optional",

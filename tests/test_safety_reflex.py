@@ -45,7 +45,24 @@ def test_gatekeeper_uses_backup_when_short_rollout_remains_unsafe():
     result = reflex.gate((0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (obstacle,))
     assert result.intervened
     assert result.backup_used
-    assert result.reason == "backup_policy"
+    stationary_clearance = reflex.rollout_minimum_clearance(
+        (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (obstacle,)
+    )
+    assert result.reason == "escape_policy"
+    assert result.velocity != pytest.approx((0.0, 0.0, 0.0))
+    assert result.filtered_minimum_clearance > stationary_clearance
+
+
+def test_best_effort_escape_never_replaces_motion_with_worse_stationary_backup():
+    reflex = _reflex(lookahead_steps=30, speed_limit=0.05)
+    obstacle = ReflexObstacle((0.04, 0.0, 0.0), (-0.2, 0.0, 0.0), 0.05)
+    result = reflex.gate((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (obstacle,))
+    stationary_clearance = reflex.rollout_minimum_clearance(
+        (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (obstacle,)
+    )
+
+    assert result.reason == "best_effort_escape"
+    assert result.filtered_minimum_clearance >= stationary_clearance
 
 
 def test_uncertainty_triggers_earlier_intervention():
