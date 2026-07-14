@@ -166,6 +166,31 @@ class SolverDiagnostics:
         return self.constraint_violation is not None
 
 
+@dataclass(frozen=True, slots=True)
+class ConstraintViolation:
+    """One violated nonlinear bound with its horizon-stage attribution."""
+
+    flat_index: int
+    stage: int | None
+    constraint: str
+    value: float
+    lower: float
+    upper: float
+    violation: float
+
+
+@dataclass(frozen=True, slots=True)
+class ConstraintViolationProfile:
+    """Auditable bound residuals; unsupported do-mpc layouts fail closed."""
+
+    maximum: float | None
+    violating_count: int
+    first_violating_index: int | None
+    maximum_index: int | None
+    stage_layout_supported: bool
+    violations: tuple[ConstraintViolation, ...]
+
+
 def diagnostics_from_stats(
     stats: Mapping[str, object],
     *,
@@ -255,6 +280,89 @@ def maximum_constraint_violation_from_mpc(mpc: object) -> float | None:
         if isfinite(high):
             violation = max(violation, value - high)
     return max(0.0, violation)
+
+
+def constraint_violation_profile_from_mpc(
+    mpc: object, *, tolerance: float = 0.0
+) -> ConstraintViolationProfile:
+    """Measure and attribute this project's do-mpc constraints per horizon stage.
+
+    The supported layout is the deterministic, discrete do-mpc formulation used
+    here: initial-state equality followed by, for each stage, state continuity
+    and the registered nonlinear constraints. Unknown layouts retain the flat
+    residual evidence but deliberately omit stage attribution.
+    """
+
+    if not isfinite(tolerance) or tolerance < 0.0:
+        raise ValueError("tolerance must be finite and non-negative")
+    try:
+        values = _numeric_vector(getattr(mpc, "opt_g_num"))
+        lower_source = getattr(mpc, "lb_opt_g", None)
+        if lower_source is None:
+            lower_source = getattr(mpc, "nlp_cons_lb")
+        upper_source = getattr(mpc, "ub_opt_g", None)
+        if upper_source is None:
+            upper_source = getattr(mpc, "nlp_cons_ub")
+        lower = _numeric_vector(lower_source)
+        upper = _numeric_vector(upper_source)
+    except (AttributeError, TypeError, ValueError):
+        return ConstraintViolationProfile(None, 0, None, None, False, ())
+    if not values or len(values) != len(lower) or len(values) != len(upper):
+        return ConstraintViolationProfile(None, 0, None, None, False, ())
+
+    n_x = getattr(getattr(mpc, "model", None), "n_x", None)
+    horizon = getattr(getattr(mpc, "settings", None), "n_horizon", None)
+    nl_struct = getattr(mpc, "_nl_cons", None)
+    labels_method = getattr(nl_struct, "labels", None)
+    labels = tuple(labels_method()) if callable(labels_method) else ()
+    n_nl = len(labels)
+    supported = (
+        isinstance(n_x, int)
+        and isinstance(horizon, int)
+        and n_x > 0
+        and horizon > 0
+        and n_nl > 0
+        and len(values) == n_x + horizon * (n_x + n_nl)
+    )
+    records: list[ConstraintViolation] = []
+    max_violation = 0.0
+    max_index: int | None = None
+    for index, (value, low, high) in enumerate(zip(values, lower, upper)):
+        if not isfinite(value):
+            return ConstraintViolationProfile(None, 0, None, None, False, ())
+        amount = 0.0
+        if isfinite(low):
+            amount = max(amount, low - value)
+        if isfinite(high):
+            amount = max(amount, value - high)
+        if amount > max_violation:
+            max_violation = amount
+            max_index = index
+        if amount <= tolerance:
+            continue
+        stage: int | None = None
+        name = "unattributed"
+        if supported and index >= n_x:
+            stage = (index - n_x) // (n_x + n_nl)
+            offset = (index - n_x) % (n_x + n_nl)
+            name = (
+                f"state_continuity[{offset}]"
+                if offset < n_x
+                else labels[offset - n_x].strip("[]")
+            )
+        elif supported:
+            name = f"initial_state[{index}]"
+        records.append(
+            ConstraintViolation(index, stage, name, value, low, high, amount)
+        )
+    return ConstraintViolationProfile(
+        maximum=max(0.0, max_violation),
+        violating_count=len(records),
+        first_violating_index=records[0].flat_index if records else None,
+        maximum_index=max_index,
+        stage_layout_supported=supported,
+        violations=tuple(records),
+    )
 
 
 def diagnostics_from_do_mpc(

@@ -12,6 +12,7 @@ from lampc_cbf.solver import (
     Termination,
     diagnostics_from_stats,
     diagnostics_from_do_mpc,
+    constraint_violation_profile_from_mpc,
     maximum_constraint_violation_from_mpc,
     normalize_termination,
     safe_control_or_none,
@@ -26,11 +27,42 @@ class _FakeMpc:
     ub_opt_g = [0.0, 1.0, float("inf")]
 
 
+class _Labels:
+    @staticmethod
+    def labels():
+        return ["[dynamic_obstacle_cbf,0]"]
+
+
+class _StageFakeMpc:
+    class model:
+        n_x = 2
+
+    class settings:
+        n_horizon = 2
+
+    _nl_cons = _Labels()
+    opt_g_num = [0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, -0.1]
+    lb_opt_g = [0.0, 0.0, 0.0, 0.0, -float("inf"), 0.0, 0.0, 0.0]
+    ub_opt_g = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, float("inf")]
+
+
 def test_do_mpc_constraint_violation_is_measured_against_both_bounds() -> None:
     assert maximum_constraint_violation_from_mpc(_FakeMpc()) == pytest.approx(0.2)
     result = diagnostics_from_do_mpc(_FakeMpc(), measured_solve_time=0.04)
     assert result.constraint_violation == pytest.approx(0.2)
     assert result.solve_time == pytest.approx(0.04)
+
+
+def test_constraint_violations_are_attributed_to_horizon_stages() -> None:
+    profile = constraint_violation_profile_from_mpc(_StageFakeMpc())
+
+    assert profile.stage_layout_supported
+    assert profile.maximum == pytest.approx(0.2)
+    assert profile.violating_count == 2
+    assert [(item.stage, item.constraint) for item in profile.violations] == [
+        (0, "dynamic_obstacle_cbf,0"),
+        (1, "dynamic_obstacle_cbf,0"),
+    ]
 
 
 def diagnostics(

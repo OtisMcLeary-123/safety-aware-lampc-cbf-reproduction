@@ -52,6 +52,8 @@ class SmoothDynamicConfig:
     feedback_ttc_threshold: float | None = None
     feedback_response_latency: float = 0.0
     feedback_gamma: float | None = None
+    feedback_reaction_margin: float = 0.20
+    reject_feedback_without_causal_opportunity: bool = True
     solver_max_constraint_violation: float = 1e-6
     control_deadline: float = 0.04
     reject_deadline_miss: bool = False
@@ -102,6 +104,8 @@ class SmoothDynamicConfig:
             raise ValueError("feedback_ttc_threshold must be positive when provided")
         if self.feedback_response_latency < 0.0:
             raise ValueError("feedback_response_latency must be non-negative")
+        if self.feedback_reaction_margin < 0.0:
+            raise ValueError("feedback_reaction_margin must be non-negative")
         if self.feedback_gamma is not None and not 0.0 < self.feedback_gamma <= 0.15:
             raise ValueError("feedback_gamma must be in (0, 0.15] when provided")
         if (self.feedback_ttc_threshold is None) != (self.feedback_gamma is None):
@@ -148,6 +152,9 @@ class SmoothDynamicResult:
     feedback_trigger_time: float | None
     feedback_available_time: float | None
     feedback_causal_opportunity: bool
+    feedback_updates_rejected_late: int
+    most_infeasible_stage: int | None
+    infeasible_stage_events: int
     smoothness: SmoothnessMetrics
     output_dir: str
 
@@ -421,9 +428,11 @@ def run_smooth_dynamic_demo(
         ContextAwareSafetyScheduler,
         constant_velocity_ttc,
         feedback_has_causal_opportunity,
+        feedback_update_deadline,
     )
     from .solver import (
         FeasibilityPolicy,
+        constraint_violation_profile_from_mpc,
         diagnostics_from_do_mpc,
         safe_control_or_none,
     )
@@ -578,6 +587,9 @@ def run_smooth_dynamic_demo(
         ttc_feedback_available_time: float | None = None
         ttc_feedback_published = False
         ttc_feedback_causal_opportunity = False
+        ttc_feedback_valid_until: float | None = None
+        feedback_updates_rejected_late = 0
+        infeasible_stage_counts: dict[int, int] = {}
 
         for step_index in range(cfg.max_steps):
             elapsed = step_index * mpc_config.dt
@@ -592,16 +604,29 @@ def run_smooth_dynamic_demo(
                 and not ttc_feedback_published
                 and elapsed + 1e-12 >= ttc_feedback_available_time
             ):
-                gamma_queue.publish(
-                    GammaUpdate(
-                        gamma=float(cfg.feedback_gamma),
-                        version=len(cfg.gamma_schedule) + 1,
-                        created_at=elapsed,
-                        valid_until=elapsed + cfg.gamma_update_ttl,
-                        reason="ttc_triggered_online_feedback",
-                        source="benchmark_replay",
+                if (
+                    ttc_feedback_causal_opportunity
+                    or not cfg.reject_feedback_without_causal_opportunity
+                ):
+                    update_created_at = float(ttc_feedback_trigger_time)
+                    update_valid_until = float(ttc_feedback_valid_until)
+                    if not ttc_feedback_causal_opportunity:
+                        # Explicit legacy ablation only: reproduce the former
+                        # arrival-time TTL bug so its effect can be measured.
+                        update_created_at = elapsed
+                        update_valid_until = elapsed + cfg.gamma_update_ttl
+                    gamma_queue.publish(
+                        GammaUpdate(
+                            gamma=float(cfg.feedback_gamma),
+                            version=len(cfg.gamma_schedule) + 1,
+                            created_at=update_created_at,
+                            valid_until=update_valid_until,
+                            reason="ttc_triggered_online_feedback",
+                            source="benchmark_replay",
+                        )
                     )
-                )
+                else:
+                    feedback_updates_rejected_late += 1
                 ttc_feedback_published = True
             while (
                 schedule_index < len(cfg.gamma_schedule)
@@ -625,6 +650,7 @@ def run_smooth_dynamic_demo(
                 + gamma_audit.rejected_old_version
                 + gamma_audit.rejected_future
             )
+            feedback_updates_rejected_late += gamma_audit.rejected_expired
             if gamma_audit.applied is not None:
                 tvp.update_gamma(gamma_audit.applied.gamma)
                 # The deterministic provisional profile protects the latency
@@ -679,6 +705,13 @@ def run_smooth_dynamic_demo(
                 ttc_feedback_causal_opportunity = feedback_has_causal_opportunity(
                     predicted_ttc,
                     cfg.feedback_response_latency,
+                    reaction_margin=cfg.feedback_reaction_margin,
+                )
+                ttc_feedback_valid_until = feedback_update_deadline(
+                    elapsed,
+                    predicted_ttc,
+                    cfg.gamma_update_ttl,
+                    reaction_margin=cfg.feedback_reaction_margin,
                 )
                 provisional_safety_active = True
             if cfg.context_safety_enabled or provisional_safety_active:
@@ -714,6 +747,9 @@ def run_smooth_dynamic_demo(
             diagnostics = diagnostics_from_do_mpc(
                 mpc, measured_solve_time=measured_solve_time
             )
+            violation_profile = constraint_violation_profile_from_mpc(
+                mpc, tolerance=cfg.solver_max_constraint_violation
+            )
             deadline_missed = measured_solve_time > cfg.control_deadline
             accepted = safe_control_or_none(
                 raw_candidate,
@@ -734,6 +770,11 @@ def run_smooth_dynamic_demo(
                 candidate = np.zeros(4, dtype=float)
             else:
                 candidate = np.asarray(accepted[:4], dtype=float)
+            for violation in violation_profile.violations:
+                if violation.stage is not None:
+                    infeasible_stage_counts[violation.stage] = (
+                        infeasible_stage_counts.get(violation.stage, 0) + 1
+                    )
             solver_audits.append(
                 {
                     "step": step_index,
@@ -746,6 +787,12 @@ def run_smooth_dynamic_demo(
                     "solve_time": measured_solve_time,
                     "deadline_missed": deadline_missed,
                     "candidate_rejected": rejected_candidate,
+                    "constraint_stage_layout_supported": (
+                        violation_profile.stage_layout_supported
+                    ),
+                    "constraint_violations": [
+                        asdict(item) for item in violation_profile.violations
+                    ],
                 }
             )
             optimal_decay_trace.append(
@@ -929,7 +976,9 @@ def run_smooth_dynamic_demo(
             max_solve_time=float(np.max(solve_times)),
             final_gamma=tvp.gamma,
             gamma_updates_applied=len(applied_gamma_updates),
-            gamma_updates_rejected=rejected_gamma_updates,
+            gamma_updates_rejected=(
+                rejected_gamma_updates + feedback_updates_rejected_late
+            ),
             reflex_interventions=len(reflex_audits),
             reflex_backups=sum(int(item["backup_used"]) for item in reflex_audits),
             mean_optimal_decay=float(np.mean(optimal_decay_trace)),
@@ -954,6 +1003,13 @@ def run_smooth_dynamic_demo(
             feedback_trigger_time=ttc_feedback_trigger_time,
             feedback_available_time=ttc_feedback_available_time,
             feedback_causal_opportunity=ttc_feedback_causal_opportunity,
+            feedback_updates_rejected_late=feedback_updates_rejected_late,
+            most_infeasible_stage=(
+                max(infeasible_stage_counts, key=infeasible_stage_counts.get)
+                if infeasible_stage_counts
+                else None
+            ),
+            infeasible_stage_events=sum(infeasible_stage_counts.values()),
             smoothness=smoothness,
             output_dir=str(output_dir),
         )

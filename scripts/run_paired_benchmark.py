@@ -6,7 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 
-from lampc_cbf.hf_llm import HuggingFaceGammaMapper
+from lampc_cbf.hf_llm import HFLLMConfig, HuggingFaceGammaMapper
+from lampc_cbf.nvidia_nim_gamma import NvidiaNIMGammaConfig, NvidiaNIMGammaMapper
 from lampc_cbf.paired_benchmark import PairedBenchmarkConfig, run_paired_benchmark
 
 
@@ -29,6 +30,12 @@ def main() -> int:
         default="ttc",
     )
     parser.add_argument("--feedback-ttc-threshold", type=float, default=1.5)
+    parser.add_argument(
+        "--llm-provider", choices=("nvidia-nim", "hugging-face"),
+        default="nvidia-nim",
+    )
+    parser.add_argument("--llm-model", default=None)
+    parser.add_argument("--llm-timeout", type=float, default=3.0)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--no-resume", action="store_true")
     args = parser.parse_args()
@@ -36,7 +43,23 @@ def main() -> int:
     episodes = args.episodes or stage_episodes[args.stage]
     output_dir = args.output_dir or f"artifacts/paired_benchmark_protocol_v2_{args.stage}_{episodes}"
 
-    feedback = HuggingFaceGammaMapper().infer_gamma(
+    if args.llm_provider == "nvidia-nim":
+        defaults = NvidiaNIMGammaConfig()
+        mapper = NvidiaNIMGammaMapper(
+            NvidiaNIMGammaConfig(
+                model=args.llm_model or defaults.model,
+                timeout_seconds=args.llm_timeout,
+            )
+        )
+    else:
+        defaults = HFLLMConfig()
+        mapper = HuggingFaceGammaMapper(
+            HFLLMConfig(
+                model=args.llm_model or defaults.model,
+                timeout_seconds=args.llm_timeout,
+            )
+        )
+    feedback = mapper.infer_gamma(
         "Watch out! I think the robot is going to crash soon. Increase clearance now.",
         current_gamma=0.15,
         feedback=True,

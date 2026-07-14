@@ -257,11 +257,14 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "feedback_trigger_time": result.feedback_trigger_time,
                 "feedback_available_time": result.feedback_available_time,
                 "feedback_causal_opportunity": result.feedback_causal_opportunity,
+                "feedback_updates_rejected_late": result.feedback_updates_rejected_late,
                 "solver_failures": result.solver_failures,
                 "solver_rejections": result.solver_rejections,
                 "deadline_misses": result.deadline_misses,
                 "emergency_fallbacks": result.emergency_fallbacks,
                 "maximum_constraint_violation": result.maximum_constraint_violation,
+                "most_infeasible_stage": result.most_infeasible_stage,
+                "infeasible_stage_events": result.infeasible_stage_events,
                 "mean_model_transition_error": result.mean_model_transition_error,
                 "max_model_transition_error": result.max_model_transition_error,
                 "mean_action_tracking_error": result.mean_action_tracking_error,
@@ -285,7 +288,8 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
         "episode", "seed", "steps", "gamma_updates_applied", "gamma_updates_rejected",
         "reflex_interventions", "reflex_backups",
         "solver_failures", "solver_rejections", "deadline_misses",
-        "emergency_fallbacks",
+        "emergency_fallbacks", "feedback_updates_rejected_late",
+        "most_infeasible_stage", "infeasible_stage_events",
     }
     text_fields = {
         "method", "comparator", "experiment_profile", "outcome",
@@ -410,6 +414,14 @@ def summarize_paired_rows(
             "feedback_updates_with_causal_opportunity": sum(
                 bool(row.get("feedback_causal_opportunity", False))
                 and int(row.get("gamma_updates_applied", 0)) > 0
+                for row in method_rows
+            ),
+            "feedback_updates_rejected_late": sum(
+                int(row.get("feedback_updates_rejected_late", 0))
+                for row in method_rows
+            ),
+            "infeasible_stage_events": sum(
+                int(row.get("infeasible_stage_events", 0))
                 for row in method_rows
             ),
             "experiment_profile": method.experiment_profile,

@@ -5,7 +5,13 @@ from lampc_cbf.safety_scheduler import (
     SafetyProfile,
     constant_velocity_ttc,
     feedback_has_causal_opportunity,
+    feedback_update_deadline,
 )
+
+
+def test_feedback_deadline_preserves_request_time_and_hazard_margin() -> None:
+    assert feedback_update_deadline(2.0, 0.8, 1.0, reaction_margin=0.2) == pytest.approx(2.6)
+    assert feedback_update_deadline(2.0, 4.0, 1.0, reaction_margin=0.2) == pytest.approx(3.0)
 
 
 def test_feedback_opportunity_requires_latency_and_reaction_margin():

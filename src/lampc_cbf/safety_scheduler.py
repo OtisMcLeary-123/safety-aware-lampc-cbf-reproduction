@@ -94,6 +94,24 @@ def feedback_has_causal_opportunity(
     return isfinite(ttc) and ttc > latency + margin
 
 
+def feedback_update_deadline(
+    request_time: float,
+    predicted_ttc: float,
+    update_ttl: float,
+    *,
+    reaction_margin: float = 0.20,
+) -> float:
+    """Return the earliest TTL or hazard deadline for an async update."""
+
+    requested = _finite_nonnegative(request_time, "request_time")
+    ttc = _finite_nonnegative(predicted_ttc, "predicted_ttc")
+    ttl = _finite_nonnegative(update_ttl, "update_ttl")
+    margin = _finite_nonnegative(reaction_margin, "reaction_margin")
+    if ttl <= 0.0:
+        raise ValueError("update_ttl must be positive")
+    return min(requested + ttl, requested + max(0.0, ttc - margin))
+
+
 def constant_velocity_ttc(
     relative_position: Sequence[float],
     relative_velocity: Sequence[float],
