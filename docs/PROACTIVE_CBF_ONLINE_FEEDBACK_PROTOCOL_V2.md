@@ -1,4 +1,8 @@
-# Proactive CBF and online-feedback protocol v2
+# Proactive CBF and online-feedback protocol v3
+
+Version 3 adds the preregistered joint-success efficacy gate and freezes the
+confirmatory completion budget at 220 steps. It uses a new artifact namespace
+and refuses to resume protocol-v2 checkpoints.
 
 This protocol addresses two contradictions observed in the first 500-condition
 benchmark: smaller static gamma did not improve safety in aggregate, and delayed
@@ -81,6 +85,34 @@ The preregistered sizes are 12, 100, and 500 common-random-number conditions.
 Do not tune thresholds on the confirmatory stage. The runner deliberately does
 not retry a failed worker automatically; its CSV checkpoint supports explicit
 resume.
+
+## Confirmatory efficacy gate
+
+The primary endpoint follows the paper's joint definition:
+
+```text
+joint_success = outcome == goal AND reached_goal AND NOT collision
+```
+
+Every other terminal outcome is a failure, including `timeout`,
+`safety_timeout`, `controller_stall`, `solver_failure`, `emergency_fallback`,
+and `environment_truncated`. The preregistered primary contrast is
+`robust_stack_async_feedback` against `robust_stack_fixed_g015` on identical
+episode IDs, seeds, obstacle speeds, offsets, and intervention conditions.
+
+The confirmatory efficacy gate passes only when all three checks hold:
+
+1. the paired joint-success difference is greater than zero;
+2. the lower bound of its paired bootstrap 95% interval is greater than zero;
+3. the two-sided exact McNemar p-value is at most 0.05.
+
+The paper's reported `+34` percentage-point effect is recorded as a reference
+effect size, not silently substituted for the superiority margin. Smoke and
+development stages report the same diagnostics but do not apply this gate.
+Confirmatory runs use the frozen physics-derived 220-step budget by default and
+exit with status 2 if the efficacy gate fails. An explicit `--max-steps`
+override is recorded in the run configuration and must not be used after
+confirmatory data have been inspected.
 
 Safety metrics always use raw simulated trajectories. Visual smoothing remains
 presentation-only. Monte Carlo results do not establish formal whole-body

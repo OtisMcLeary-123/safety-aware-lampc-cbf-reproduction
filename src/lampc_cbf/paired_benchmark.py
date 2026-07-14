@@ -17,10 +17,11 @@ from .hf_llm import GammaDecision
 
 @dataclass(frozen=True, slots=True)
 class PairedBenchmarkConfig:
+    stage: str = "confirmatory"
     episodes: int = 500
     seed: int = 20260713
     bootstrap_resamples: int = 10_000
-    max_steps: int = 140
+    max_steps: int = 220
     workers: int = 4
     speed_lower: float = 0.025
     speed_upper: float = 0.20
@@ -28,12 +29,18 @@ class PairedBenchmarkConfig:
     lateral_upper: float = 0.080
     intervention_time_lower: float = 0.0
     intervention_time_upper: float = 0.40
-    output_dir: str = "artifacts/paired_benchmark_protocol_v2_500"
+    output_dir: str = "artifacts/paired_benchmark_protocol_v3_500"
     resume: bool = True
     feedback_schedule_mode: str = "ttc"
     feedback_ttc_threshold: float = 1.5
+    efficacy_method: str = "robust_stack_async_feedback"
+    efficacy_comparator: str = "robust_stack_fixed_g015"
+    efficacy_alpha: float = 0.05
+    efficacy_minimum_paired_difference: float = 0.0
 
     def __post_init__(self) -> None:
+        if self.stage not in {"smoke", "development", "confirmatory"}:
+            raise ValueError("stage must be smoke, development, or confirmatory")
         if self.episodes < 1 or self.bootstrap_resamples < 1:
             raise ValueError("episode and bootstrap counts must be positive")
         if self.max_steps < 4 or self.workers < 1:
@@ -48,6 +55,10 @@ class PairedBenchmarkConfig:
             raise ValueError("feedback_schedule_mode must be elapsed_time or ttc")
         if self.feedback_ttc_threshold <= 0.0:
             raise ValueError("feedback_ttc_threshold must be positive")
+        if not 0.0 < self.efficacy_alpha < 1.0:
+            raise ValueError("efficacy_alpha must be in (0, 1)")
+        if not -1.0 <= self.efficacy_minimum_paired_difference <= 1.0:
+            raise ValueError("efficacy minimum paired difference must be in [-1, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +140,24 @@ def exact_mcnemar_pvalue(baseline: Sequence[bool], method: Sequence[bool]) -> fl
     return min(1.0, 2.0 * tail / (2**discordant))
 
 
+def _joint_success(row: Mapping[str, Any]) -> bool:
+    """Paper endpoint: reach the goal without collision; every timeout is failure."""
+
+    outcome = str(row.get("outcome", ""))
+    if outcome != "goal":
+        return False
+    return bool(row.get("reached_goal", False)) and not bool(row.get("collision", False))
+
+
+def _pairing_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return every available common-random-number condition identifier."""
+
+    fields = (
+        "episode", "seed", "obstacle_speed", "lateral_offset", "intervention_time"
+    )
+    return tuple((field, row[field]) for field in fields if field in row)
+
+
 def _bootstrap_interval(values: Any, resamples: int, rng: Any) -> tuple[float, float]:
     import numpy as np
 
@@ -183,6 +212,8 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     feedback_latency = float(payload["feedback_latency"])
     feedback_schedule_mode = str(payload.get("feedback_schedule_mode", "ttc"))
     feedback_ttc_threshold = float(payload.get("feedback_ttc_threshold", 1.5))
+    protocol_version = int(payload.get("protocol_version", 3))
+    benchmark_stage = str(payload.get("benchmark_stage", "confirmatory"))
     rows: list[dict[str, Any]] = []
     for method in METHODS:
         schedule: tuple[tuple[float, float], ...] = ()
@@ -230,11 +261,21 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         rows.append(
             {
                 **condition,
+                "protocol_version": protocol_version,
+                "benchmark_stage": benchmark_stage,
+                "max_steps_budget": max_steps,
                 "method": method.name,
                 "comparator": method.comparator,
                 "experiment_profile": method.experiment_profile,
                 "outcome": result.outcome,
-                "success": bool(result.reached_goal and not result.collision),
+                "joint_success": bool(
+                    result.outcome == "goal" and result.reached_goal and not result.collision
+                ),
+                # Compatibility alias. Summaries recompute the endpoint from the
+                # terminal outcome instead of trusting this stored value.
+                "success": bool(
+                    result.outcome == "goal" and result.reached_goal and not result.collision
+                ),
                 "reached_goal": result.reached_goal,
                 "collision": result.collision,
                 "steps": result.steps,
@@ -292,10 +333,12 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
         rows = list(csv.DictReader(stream))
     typed: list[dict[str, Any]] = []
     boolean_fields = {
-        "success", "reached_goal", "collision", "feedback_causal_opportunity"
+        "joint_success", "success", "reached_goal", "collision",
+        "feedback_causal_opportunity"
     }
     integer_fields = {
-        "episode", "seed", "steps", "gamma_updates_applied", "gamma_updates_rejected",
+        "protocol_version", "max_steps_budget", "episode", "seed", "steps",
+        "gamma_updates_applied", "gamma_updates_rejected",
         "reflex_interventions", "reflex_backups",
         "solver_failures", "solver_rejections", "deadline_misses",
         "solver_max_cpu_time_exits", "solver_infeasible_exits",
@@ -305,7 +348,7 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
         "safety_profile_transitions",
     }
     text_fields = {
-        "method", "comparator", "experiment_profile", "outcome",
+        "benchmark_stage", "method", "comparator", "experiment_profile", "outcome",
         "feedback_schedule_mode",
     }
     for row in rows:
@@ -358,8 +401,18 @@ def summarize_paired_rows(
         if len(method_rows) != config.episodes:
             raise ValueError(f"method {method.name} does not have {config.episodes} episodes")
         comparator_rows = by_method[method.comparator]
-        outcomes = np.asarray([bool(row["success"]) for row in method_rows], dtype=float)
-        comparator = np.asarray([bool(row["success"]) for row in comparator_rows], dtype=float)
+        method_keys = [_pairing_key(row) for row in method_rows]
+        comparator_keys = [_pairing_key(row) for row in comparator_rows]
+        if len(set(method_keys)) != len(method_keys):
+            raise ValueError(f"method {method.name} contains duplicate paired conditions")
+        if method_keys != comparator_keys:
+            raise ValueError(
+                f"method {method.name} is not paired with comparator {method.comparator}"
+            )
+        method_joint = [_joint_success(row) for row in method_rows]
+        comparator_joint = [_joint_success(row) for row in comparator_rows]
+        outcomes = np.asarray(method_joint, dtype=float)
+        comparator = np.asarray(comparator_joint, dtype=float)
         paired_difference = outcomes - comparator
         success_ci = _bootstrap_interval(outcomes, config.bootstrap_resamples, rng)
         difference_ci = _bootstrap_interval(
@@ -375,12 +428,14 @@ def summarize_paired_rows(
             clearance - comparator_clearance, config.bootstrap_resamples, rng
         )
         pvalue = exact_mcnemar_pvalue(
-            [bool(row["success"]) for row in comparator_rows],
-            [bool(row["success"]) for row in method_rows],
+            comparator_joint,
+            method_joint,
         )
         raw_pvalues[method.name] = pvalue
         summaries[method.name] = {
             "episodes": len(method_rows),
+            "paired_conditions_verified": True,
+            "endpoint": "joint_success = outcome=='goal' AND reached_goal AND NOT collision",
             "successes": int(np.sum(outcomes)),
             "success_rate": float(np.mean(outcomes)),
             "success_bootstrap_95_ci": list(success_ci),
@@ -389,11 +444,24 @@ def summarize_paired_rows(
             "paired_success_difference_95_ci": list(difference_ci),
             "mcnemar_exact_p": pvalue,
             "collisions": sum(bool(row["collision"]) for row in method_rows),
+            "timeout_failures": sum(
+                row.get("outcome") in {"timeout", "safety_timeout", "environment_truncated"}
+                for row in method_rows
+            ),
+            "stored_success_mismatches": sum(
+                bool(row.get("success", False)) != joint
+                or (
+                    "joint_success" in row
+                    and bool(row.get("joint_success", False)) != joint
+                )
+                for row, joint in zip(method_rows, method_joint)
+            ),
             "outcomes": {
                 outcome: sum(row.get("outcome") == outcome for row in method_rows)
                 for outcome in (
-                    "goal", "collision", "safety_timeout", "controller_stall",
-                    "solver_failure", "environment_truncated",
+                    "goal", "collision", "timeout", "safety_timeout",
+                    "controller_stall", "solver_failure", "emergency_fallback",
+                    "environment_truncated",
                 )
             },
             "mean_minimum_true_clearance": float(np.mean(clearance)),
@@ -461,6 +529,45 @@ def summarize_paired_rows(
     return summaries
 
 
+def evaluate_confirmatory_efficacy_gate(
+    summaries: Mapping[str, Mapping[str, Any]],
+    config: PairedBenchmarkConfig,
+) -> dict[str, Any]:
+    """Evaluate the single preregistered online-feedback efficacy contrast."""
+
+    if config.efficacy_method not in summaries:
+        raise ValueError(f"unknown efficacy method: {config.efficacy_method}")
+    method = summaries[config.efficacy_method]
+    if method.get("comparator") != config.efficacy_comparator:
+        raise ValueError("efficacy method does not use the configured comparator")
+
+    difference = float(method["paired_success_difference"])
+    lower, upper = (float(value) for value in method["paired_success_difference_95_ci"])
+    pvalue = float(method["mcnemar_exact_p"])
+    margin = config.efficacy_minimum_paired_difference
+    checks = {
+        "paired_joint_success_difference_above_margin": difference > margin,
+        "bootstrap_95_ci_lower_above_margin": lower > margin,
+        "exact_two_sided_mcnemar_p_at_most_alpha": pvalue <= config.efficacy_alpha,
+    }
+    evaluated = config.stage == "confirmatory"
+    return {
+        "evaluated": evaluated,
+        "passed": all(checks.values()) if evaluated else None,
+        "primary_method": config.efficacy_method,
+        "comparator": config.efficacy_comparator,
+        "endpoint": "paired joint success; all timeout outcomes count as failure",
+        "minimum_paired_difference": margin,
+        "alpha": config.efficacy_alpha,
+        "paired_joint_success_difference": difference,
+        "paired_joint_success_difference_95_ci": [lower, upper],
+        "exact_two_sided_mcnemar_p": pvalue,
+        "paper_reported_absolute_improvement": 0.34,
+        "paper_effect_size_reached": difference >= 0.34,
+        "checks": checks,
+    }
+
+
 def _plot_summary(rows: Sequence[Mapping[str, Any]], summaries: Mapping[str, Any], path: Path) -> None:
     import matplotlib.pyplot as plt
     import numpy as np
@@ -506,6 +613,16 @@ def run_paired_benchmark(
     root.mkdir(parents=True, exist_ok=True)
     csv_path = root / "episodes.csv"
     rows = _read_checkpoint(csv_path) if cfg.resume else []
+    if rows and any(
+        int(row.get("protocol_version", -1)) != 3
+        or row.get("benchmark_stage") != cfg.stage
+        or int(row.get("max_steps_budget", -1)) != cfg.max_steps
+        for row in rows
+    ):
+        raise ValueError(
+            "checkpoint protocol, stage, or max-step budget differs from this run; "
+            "use a new output directory"
+        )
     complete = {
         int(episode)
         for episode in {row["episode"] for row in rows}
@@ -525,6 +642,8 @@ def run_paired_benchmark(
             "feedback_latency": feedback_decision.latency_seconds,
             "feedback_schedule_mode": cfg.feedback_schedule_mode,
             "feedback_ttc_threshold": cfg.feedback_ttc_threshold,
+            "protocol_version": 3,
+            "benchmark_stage": cfg.stage,
         }
         for condition in conditions
     ]
@@ -546,11 +665,13 @@ def run_paired_benchmark(
                 if index % 10 == 0 or index == len(futures):
                     print(f"[paired] completed {len(complete) + index}/{cfg.episodes}", flush=True)
     summaries = summarize_paired_rows(rows, cfg)
+    efficacy_gate = evaluate_confirmatory_efficacy_gate(summaries, cfg)
     summary = {
-        "study_id": f"safe-panda-paired-protocol-v2-{cfg.episodes}",
-        "protocol_version": 2,
+        "study_id": f"safe-panda-paired-protocol-v3-{cfg.episodes}",
+        "protocol_version": 3,
         "config": asdict(cfg),
         "methods": summaries,
+        "efficacy_gate": efficacy_gate,
         "feedback_decision": feedback_decision.as_dict(),
         "paired_randomization": True,
         "common_random_numbers": True,
@@ -560,6 +681,10 @@ def run_paired_benchmark(
             "paired_success": "paired bootstrap difference + exact McNemar",
             "multiple_comparisons": "Holm adjustment",
             "safety_source": "raw end-effector and true obstacle trajectory",
+            "confirmatory_primary_endpoint": (
+                "paired joint success; timeout, stall, solver failure, emergency fallback, "
+                "and environment truncation are failures"
+            ),
         },
         "formal_scope": (
             "Monte Carlo evidence only; Gaussian noise is not deterministically bounded "

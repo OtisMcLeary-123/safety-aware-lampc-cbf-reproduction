@@ -23,7 +23,10 @@ def main() -> int:
         help="Override the preregistered stage size (12/100/500).",
     )
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--max-steps", type=int, default=140)
+    parser.add_argument(
+        "--max-steps", type=int, default=None,
+        help="Override the frozen stage budget (140 smoke/development, 220 confirmatory).",
+    )
     parser.add_argument(
         "--feedback-schedule-mode",
         choices=("ttc", "elapsed_time"),
@@ -41,7 +44,8 @@ def main() -> int:
     args = parser.parse_args()
     stage_episodes = {"smoke": 12, "development": 100, "confirmatory": 500}
     episodes = args.episodes or stage_episodes[args.stage]
-    output_dir = args.output_dir or f"artifacts/paired_benchmark_protocol_v2_{args.stage}_{episodes}"
+    max_steps = args.max_steps or (220 if args.stage == "confirmatory" else 140)
+    output_dir = args.output_dir or f"artifacts/paired_benchmark_protocol_v3_{args.stage}_{episodes}"
 
     if args.llm_provider == "nvidia-nim":
         defaults = NvidiaNIMGammaConfig()
@@ -71,9 +75,10 @@ def main() -> int:
     summary = run_paired_benchmark(
         feedback,
         PairedBenchmarkConfig(
+            stage=args.stage,
             episodes=episodes,
             workers=args.workers,
-            max_steps=args.max_steps,
+            max_steps=max_steps,
             output_dir=output_dir,
             resume=not args.no_resume,
             feedback_schedule_mode=args.feedback_schedule_mode,
@@ -81,6 +86,9 @@ def main() -> int:
         ),
     )
     print(json.dumps(summary["methods"], indent=2))
+    print(json.dumps({"efficacy_gate": summary["efficacy_gate"]}, indent=2))
+    if args.stage == "confirmatory" and summary["efficacy_gate"]["passed"] is not True:
+        return 2
     return 0
 
 
