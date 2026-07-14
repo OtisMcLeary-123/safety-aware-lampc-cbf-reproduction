@@ -58,7 +58,7 @@ robust-feasible.
 Failure of an efficacy gate is retained as a negative result. The next stage is
 diagnosis or a DPCBF ablation, not a longer timeout.
 
-## Development result: 20 paired episodes
+## Ablation result: 20 paired episodes
 
 The frozen 140-step ablation passed all promotion gates on 2026-07-14.
 
@@ -81,6 +81,66 @@ claim under sensor-tube discontinuities. Seventeen target episodes still ended
 at the frozen 140-step budget; timeout should remain unchanged until a separate
 physics-derived completion budget is preregistered.
 
+## Physics-derived development budget
+
+Before starting development-100, the completion budget is derived as
+
+```math
+T_{max} = \frac{d_{goal}}{v_{ref}}
+        + \frac{(\pi-2)r_{detour}}{v_{ref}}
+        + T_{sensor} + T_{feedback} + T_{recovery}.
+```
+
+The detour term replaces the diameter crossing an obstacle with a semicircle.
+Frozen inputs are `d_goal=0.30 m`, `v_ref=0.08 m/s`,
+`r_detour=0.10+0.035+0.08=0.215 m`, `T_sensor=0.67 s`,
+`T_feedback=0.4971896839560941 s`, `T_recovery=0.80 s`, and
+`dt=0.04 s`. Therefore:
+
+- direct path: 3.750 s;
+- extra semicircular detour: 3.068 s;
+- sensing/feedback/recovery reserve: 1.967 s;
+- total: 8.785 s;
+- development budget: `ceil(8.785/0.04) = 220` control steps.
+
+The runner refuses to start unless the preceding 20-episode summary exists,
+uses the expected protocol, contains the selected target, and has a passed
+gate. Development uses only the selected C3BF policy-library/subgoal stack; it
+does not rerun discarded variants or DPCBF.
+
+## Development-100 result
+
+The selected C3BF stack completed the frozen 100-episode deterministic grid
+with the 220-step budget and passed every development gate.
+
+| Metric | Development result |
+|---|---:|
+| Goal success | 82/100 (82.0%) |
+| Success Wilson 95% interval | [73.3%, 88.3%] |
+| Safety timeout | 18/100 |
+| Collision | 0/100; Wilson upper bound 3.70% |
+| Controller stall | 0/100; Wilson upper bound 3.70% |
+| Mean goal progress | 240.9 mm |
+| Mean / worst raw clearance | 56.6 / 27.5 mm |
+| Reflex interventions | 2,974 / 17,698 steps (16.8%) |
+| Robust-recovery steps | 1,992 / 17,698 (11.3%) |
+| Mean side switches | 0.0 per episode |
+| Solver rejections | 15 / 17,698 (0.0848%) |
+| Deadline misses | 3 / 17,698 (0.0170%) |
+| Maximum episode p99 solve time | 28.0 ms |
+
+All ten scenes at the slowest obstacle speed (`0.025 m/s`) timed out. The
+other eight timeouts occurred between `0.044` and `0.103 m/s`; no scene at or
+above `0.122 m/s` timed out. Twelve of eighteen timeouts used negative lateral
+offsets. Three timeout episodes stopped within 4.1 mm beyond the 50 mm goal
+threshold. These are completion-budget effects with positive progress, not the
+controller stalls observed before the liveness remediation.
+
+The run still contains 1,992 explicitly labeled robust-recovery steps, so the
+result supports empirical physical collision avoidance and improved task
+completion but does not establish continuous robust feasibility. Development
+success is not confirmatory-500 evidence.
+
 ## Run
 
 ```bash
@@ -90,3 +150,10 @@ PYTHONPATH=src python scripts/run_collision_cone_liveness_ablation.py \
 
 Outputs are written to `artifacts/collision_cone_liveness_ablation_20/` and are
 not committed by default.
+
+Run the gated development stage with:
+
+```bash
+PYTHONPATH=src python scripts/run_liveness_development.py \
+  --episodes 100 --workers 4
+```

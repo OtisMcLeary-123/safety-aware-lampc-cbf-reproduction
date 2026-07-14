@@ -227,6 +227,24 @@ stall in four scenes and 47.1 mm lower mean progress than the selected C3BF
 stack, so the DPCBF 20-episode run was not started. See the
 [DPCBF ablation report](docs/DPCBF_ABLATION.md).
 
+The subsequent development workflow derives an 8.785 s (`220` step) completion
+budget from path length, a semicircular obstacle detour, and measured
+sensing/feedback/recovery delays. It refuses to run unless the liveness
+ablation gate passed:
+
+```bash
+PYTHONPATH=src python scripts/run_liveness_development.py \
+  --episodes 100 --workers 4
+```
+
+The completed development run reached the goal in **82/100** episodes with
+zero observed collisions and zero controller stalls. Eighteen episodes made
+positive progress but exhausted the 220-step budget. Mean/worst raw clearance
+was 56.6/27.5 mm; solver rejection and deadline-miss rates were 0.0848% and
+0.0170%. The safety/timing gate passed, while 1,992 robust-recovery steps remain
+an explicit limitation on any formal robust-safety claim. Full interpretation
+is in the [collision-cone liveness protocol](docs/COLLISION_CONE_LIVENESS_PROTOCOL.md).
+
 <details>
 <summary><strong>Additional experiment commands</strong></summary>
 
