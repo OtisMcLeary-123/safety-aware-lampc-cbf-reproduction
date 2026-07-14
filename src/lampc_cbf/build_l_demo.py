@@ -451,6 +451,7 @@ def run_build_l_mpc_cbf_demo(
                 candidate,
                 4,
                 linear_input_limit=mpc_config.linear_input_limit,
+                dt=mpc_config.dt,
             )
             action[3] = gripper_command
             env.step(action)

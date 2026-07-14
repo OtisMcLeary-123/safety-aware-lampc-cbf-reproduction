@@ -44,6 +44,11 @@ class SmoothDynamicConfig:
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
     safety_mode: str = "cbf"
+    # ``command_velocity`` matches the closed-loop simulator interface: the
+    # command selected at this control cycle determines the position used by
+    # the one-step CBF. ``paper_state`` retains the published double-integrator
+    # transition, where p[k+1] depends on the stored velocity x[4:7].
+    cbf_transition_mode: str = "command_velocity"
     gamma_schedule: tuple[tuple[float, float], ...] = ()
     gamma_update_ttl: float = 1.0
     context_safety_enabled: bool = False
@@ -55,6 +60,7 @@ class SmoothDynamicConfig:
     feedback_reaction_margin: float = 0.20
     reject_feedback_without_causal_opportunity: bool = True
     solver_max_constraint_violation: float = 1e-6
+    solver_max_cpu_time: float = 0.035
     control_deadline: float = 0.04
     reject_deadline_miss: bool = False
     save_plots: bool = True
@@ -90,10 +96,16 @@ class SmoothDynamicConfig:
             raise ValueError("avoidance_onset_threshold must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
             raise ValueError("safety_mode must be cbf, distance, or none")
+        if self.cbf_transition_mode not in {"paper_state", "command_velocity"}:
+            raise ValueError(
+                "cbf_transition_mode must be paper_state or command_velocity"
+            )
         if not 1 <= self.requested_safety_level <= 5:
             raise ValueError("requested_safety_level must be in [1, 5]")
         if self.solver_max_constraint_violation < 0.0:
             raise ValueError("solver_max_constraint_violation must be non-negative")
+        if self.solver_max_cpu_time <= 0.0:
+            raise ValueError("solver_max_cpu_time must be positive")
         if self.control_deadline <= 0.0:
             raise ValueError("control_deadline must be positive")
         if any(time < 0.0 for time in self.provisional_feedback_times):
@@ -131,6 +143,7 @@ class SmoothDynamicResult:
     final_goal_distance: float
     mean_solve_time: float
     max_solve_time: float
+    p99_solve_time: float
     final_gamma: float
     gamma_updates_applied: int
     gamma_updates_rejected: int
@@ -142,6 +155,9 @@ class SmoothDynamicResult:
     minimum_predicted_ttc: float | None
     solver_failures: int
     solver_rejections: int
+    solver_max_cpu_time_exits: int
+    solver_infeasible_exits: int
+    solver_unknown_exits: int
     deadline_misses: int
     emergency_fallbacks: int
     maximum_constraint_violation: float | None
@@ -157,6 +173,17 @@ class SmoothDynamicResult:
     infeasible_stage_events: int
     smoothness: SmoothnessMetrics
     output_dir: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceObstacleStage:
+    """Auditable reference and obstacle TVPs for one horizon stage."""
+
+    reference_state: tuple[float, ...]
+    obstacle_position: tuple[float, float, float]
+    obstacle_next_position: tuple[float, float, float]
+    robust_radius: float
+    robust_radius_next: float
 
 
 class ReferenceObstacleTVP:
@@ -178,6 +205,7 @@ class ReferenceObstacleTVP:
         tube_config: Any | None = None,
         velocity_filter: float = 0.5,
         direct_target: bool = False,
+        cbf_transition_mode: str = "paper_state",
     ) -> None:
         import numpy as np
 
@@ -209,6 +237,11 @@ class ReferenceObstacleTVP:
         self.tube = tube_config or UncertaintyTubeConfig()
         self.control_time = 0.0
         self.direct_target = direct_target
+        if cbf_transition_mode not in {"paper_state", "command_velocity"}:
+            raise ValueError(
+                "cbf_transition_mode must be paper_state or command_velocity"
+            )
+        self.cbf_transition_mode = cbf_transition_mode
         segment_lengths = np.linalg.norm(
             np.diff(self.reference_path, axis=0), axis=1
         )
@@ -288,10 +321,93 @@ class ReferenceObstacleTVP:
         )
         self._gamma_tvp = model.set_variable("_tvp", "cbf_gamma", shape=(1, 1))
 
+    def prediction_at_stage(self, stage: int) -> ReferenceObstacleStage:
+        """Return the exact TVPs assigned to ``stage`` by :meth:`configure`.
+
+        Keeping this calculation independent of do-mpc makes the obstacle
+        current/next indexing directly testable. Stage ``k`` represents times
+        ``t+k*dt`` and ``t+(k+1)*dt`` respectively.
+        """
+
+        import numpy as np
+
+        if not isinstance(stage, int) or not 0 <= stage <= self.horizon:
+            raise ValueError("stage must be an integer in [0, horizon]")
+        base_distance = self.arc_length[self.progress_index]
+        target_distance = (
+            self.arc_length[-1]
+            if self.direct_target
+            else min(
+                self.arc_length[-1],
+                base_distance
+                + stage * self.dt * self.reference_speed * self.speed_scale,
+            )
+        )
+        index = int(
+            min(
+                len(self.reference_path) - 1,
+                np.searchsorted(self.arc_length, target_distance, side="left"),
+            )
+        )
+        point = self.reference_path[index]
+        next_index = min(index + 1, len(self.reference_path) - 1)
+        tangent = self.reference_path[next_index] - point
+        tangent_norm = float(np.linalg.norm(tangent))
+        desired_velocity = (
+            tangent / tangent_norm * self.reference_speed * self.speed_scale
+            if (
+                not self.direct_target
+                and tangent_norm > 1e-9
+                and index < len(self.reference_path) - 1
+            )
+            else np.zeros(3)
+        )
+        reference_state = np.concatenate([point, [0.0], desired_velocity, [0.0]])
+        stage_age = (
+            max(0.0, self.control_time - self.observer.timestamp) + stage * self.dt
+        )
+        next_age = stage_age + self.dt
+        if self.prediction_mode in {"velocity", "velocity_tube"}:
+            obstacle_position = self.observer.predict(
+                self.observer.timestamp + stage_age
+            )
+            obstacle_next_position = self.observer.predict(
+                self.observer.timestamp + next_age
+            )
+            tube_now = (
+                self.tube.inflation(stage_age)
+                if self.prediction_mode == "velocity_tube"
+                else 0.0
+            )
+            tube_next = (
+                self.tube.inflation(next_age)
+                if self.prediction_mode == "velocity_tube"
+                else 0.0
+            )
+            robust_radius = (
+                self.base_combined_radius + self.clearance_margin + tube_now
+            )
+            robust_radius_next = (
+                self.base_combined_radius + self.clearance_margin + tube_next
+            )
+        else:
+            obstacle_position = tuple(float(value) for value in self.measurement)
+            obstacle_next_position = obstacle_position
+            robust_radius = self.base_combined_radius + self.clearance_margin
+            robust_radius_next = robust_radius
+        return ReferenceObstacleStage(
+            reference_state=tuple(float(value) for value in reference_state),
+            obstacle_position=tuple(float(value) for value in obstacle_position),
+            obstacle_next_position=tuple(
+                float(value) for value in obstacle_next_position
+            ),
+            robust_radius=float(robust_radius),
+            robust_radius_next=float(robust_radius_next),
+        )
+
     def configure(self, model: Any, mpc: Any, x: Any, u: Any, ca: Any) -> None:
         import numpy as np
 
-        del u
         if (
             self._obstacle_tvp is None
             or self._obstacle_next_tvp is None
@@ -302,7 +418,12 @@ class ReferenceObstacleTVP:
         ):
             raise RuntimeError("declare must run before configure")
         position = x[:3]
-        next_position = position + self.dt * x[4:7]
+        transition_velocity = (
+            u[:3]
+            if self.cbf_transition_mode == "command_velocity"
+            else x[4:7]
+        )
+        next_position = position + self.dt * transition_velocity
         h_current = (
             ca.sumsqr(position - self._obstacle_tvp) - self._robust_radius_tvp**2
         )
@@ -327,75 +448,22 @@ class ReferenceObstacleTVP:
 
         def tvp_fun(t_now: float) -> Any:
             del t_now
-            base_distance = self.arc_length[self.progress_index]
             for stage in range(self.horizon + 1):
-                target_distance = (
-                    self.arc_length[-1]
-                    if self.direct_target
-                    else min(
-                        self.arc_length[-1],
-                        base_distance
-                        + stage * self.dt * self.reference_speed * self.speed_scale,
-                    )
-                )
-                index = int(
-                    min(
-                        len(self.reference_path) - 1,
-                        np.searchsorted(self.arc_length, target_distance, side="left"),
-                    )
-                )
-                point = self.reference_path[index]
-                next_index = min(index + 1, len(self.reference_path) - 1)
-                tangent = self.reference_path[next_index] - point
-                tangent_norm = float(np.linalg.norm(tangent))
-                desired_velocity = (
-                    tangent / tangent_norm * self.reference_speed * self.speed_scale
-                    if (
-                        not self.direct_target
-                        and tangent_norm > 1e-9
-                        and index < len(self.reference_path) - 1
-                    )
-                    else np.zeros(3)
-                )
-                reference_state = np.concatenate(
-                    [point, [0.0], desired_velocity, [0.0]]
-                )
-                stage_age = max(0.0, self.control_time - self.observer.timestamp) + stage * self.dt
-                next_age = stage_age + self.dt
-                if self.prediction_mode in {"velocity", "velocity_tube"}:
-                    obstacle_position = np.asarray(
-                        self.observer.predict(self.observer.timestamp + stage_age), dtype=float
-                    )
-                    obstacle_next_position = np.asarray(
-                        self.observer.predict(self.observer.timestamp + next_age), dtype=float
-                    )
-                    tube_now = (
-                        self.tube.inflation(stage_age)
-                        if self.prediction_mode == "velocity_tube"
-                        else 0.0
-                    )
-                    tube_next = (
-                        self.tube.inflation(next_age)
-                        if self.prediction_mode == "velocity_tube"
-                        else 0.0
-                    )
-                    robust_radius = self.base_combined_radius + self.clearance_margin + tube_now
-                    robust_radius_next = self.base_combined_radius + self.clearance_margin + tube_next
-                else:
-                    obstacle_position = self.measurement
-                    obstacle_next_position = self.measurement
-                    robust_radius = self.base_combined_radius + self.clearance_margin
-                    robust_radius_next = self.base_combined_radius + self.clearance_margin
+                prediction = self.prediction_at_stage(stage)
                 template["_tvp", stage, "obstacle_position"] = (
-                    obstacle_position.reshape(3, 1)
+                    np.asarray(prediction.obstacle_position).reshape(3, 1)
                 )
                 template["_tvp", stage, "obstacle_next_position"] = (
-                    obstacle_next_position.reshape(3, 1)
+                    np.asarray(prediction.obstacle_next_position).reshape(3, 1)
                 )
-                template["_tvp", stage, "obstacle_robust_radius"] = robust_radius
-                template["_tvp", stage, "obstacle_next_robust_radius"] = robust_radius_next
+                template["_tvp", stage, "obstacle_robust_radius"] = (
+                    prediction.robust_radius
+                )
+                template["_tvp", stage, "obstacle_next_robust_radius"] = (
+                    prediction.robust_radius_next
+                )
                 template["_tvp", stage, "reference_state"] = (
-                    reference_state.reshape(8, 1)
+                    np.asarray(prediction.reference_state).reshape(8, 1)
                 )
                 template["_tvp", stage, "cbf_gamma"] = self.gamma
             return template
@@ -432,6 +500,7 @@ def run_smooth_dynamic_demo(
     )
     from .solver import (
         FeasibilityPolicy,
+        IpoptConfig,
         constraint_violation_profile_from_mpc,
         diagnostics_from_do_mpc,
         safe_control_or_none,
@@ -468,6 +537,7 @@ def run_smooth_dynamic_demo(
     solver_audits: list[dict[str, Any]] = []
     solver_failures = 0
     solver_rejections = 0
+    solver_termination_counts: dict[str, int] = {}
     emergency_fallbacks = 0
     constraint_violations: list[float] = []
     sensor_update_steps: list[int] = [0]
@@ -537,11 +607,20 @@ def run_smooth_dynamic_demo(
             ),
             velocity_filter=cfg.velocity_filter,
             direct_target=cfg.reference_mode == "direct_target",
+            cbf_transition_mode=cfg.cbf_transition_mode,
         )
         _, mpc = build_mpc_controller(
             mpc_config,
             model_builders=(tvp.declare,),
             constraint_builders=(tvp.configure,),
+            nlpsol_options=IpoptConfig(
+                constraint_violation_tolerance=(
+                    cfg.solver_max_constraint_violation
+                    if cfg.solver_max_constraint_violation > 0.0
+                    else 1e-12
+                ),
+                max_cpu_time=cfg.solver_max_cpu_time,
+            ).casadi_options(),
         )
         reflex = OperationalSpaceSafetyReflex(
             SafetyReflexConfig(
@@ -761,6 +840,10 @@ def run_smooth_dynamic_demo(
                 accepted = None
             if not diagnostics.solver_success:
                 solver_failures += 1
+            termination_name = diagnostics.termination.value
+            solver_termination_counts[termination_name] = (
+                solver_termination_counts.get(termination_name, 0) + 1
+            )
             if diagnostics.constraint_violation is not None:
                 constraint_violations.append(diagnostics.constraint_violation)
             rejected_candidate = accepted is None
@@ -849,6 +932,7 @@ def run_smooth_dynamic_demo(
             action = paper_control_to_safe_panda_action(
                 candidate, env.action_space.shape[0],
                 linear_input_limit=mpc_config.linear_input_limit,
+                dt=mpc_config.dt,
             )
             observation, _, terminated, truncated, _ = env.step(action)
             previous_increment = candidate - previous_control
@@ -974,6 +1058,7 @@ def run_smooth_dynamic_demo(
             final_goal_distance=float(goal_distances[-1]),
             mean_solve_time=float(np.mean(solve_times)),
             max_solve_time=float(np.max(solve_times)),
+            p99_solve_time=float(np.quantile(solve_times, 0.99)),
             final_gamma=tvp.gamma,
             gamma_updates_applied=len(applied_gamma_updates),
             gamma_updates_rejected=(
@@ -989,6 +1074,13 @@ def run_smooth_dynamic_demo(
             ),
             solver_failures=solver_failures,
             solver_rejections=solver_rejections,
+            solver_max_cpu_time_exits=solver_termination_counts.get(
+                "max_cpu_time", 0
+            ),
+            solver_infeasible_exits=solver_termination_counts.get(
+                "infeasible", 0
+            ),
+            solver_unknown_exits=solver_termination_counts.get("unknown", 0),
             deadline_misses=sum(
                 solve_time > cfg.control_deadline for solve_time in solve_times
             ),

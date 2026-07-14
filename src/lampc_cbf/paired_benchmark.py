@@ -243,6 +243,7 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "final_goal_distance": result.final_goal_distance,
                 "mean_solve_time": result.mean_solve_time,
                 "max_solve_time": result.max_solve_time,
+                "p99_solve_time": result.p99_solve_time,
                 "final_gamma": result.final_gamma,
                 "gamma_updates_applied": result.gamma_updates_applied,
                 "gamma_updates_rejected": result.gamma_updates_rejected,
@@ -260,6 +261,9 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "feedback_updates_rejected_late": result.feedback_updates_rejected_late,
                 "solver_failures": result.solver_failures,
                 "solver_rejections": result.solver_rejections,
+                "solver_max_cpu_time_exits": result.solver_max_cpu_time_exits,
+                "solver_infeasible_exits": result.solver_infeasible_exits,
+                "solver_unknown_exits": result.solver_unknown_exits,
                 "deadline_misses": result.deadline_misses,
                 "emergency_fallbacks": result.emergency_fallbacks,
                 "maximum_constraint_violation": result.maximum_constraint_violation,
@@ -288,6 +292,8 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
         "episode", "seed", "steps", "gamma_updates_applied", "gamma_updates_rejected",
         "reflex_interventions", "reflex_backups",
         "solver_failures", "solver_rejections", "deadline_misses",
+        "solver_max_cpu_time_exits", "solver_infeasible_exits",
+        "solver_unknown_exits",
         "emergency_fallbacks", "feedback_updates_rejected_late",
         "most_infeasible_stage", "infeasible_stage_events",
     }
@@ -397,6 +403,10 @@ def summarize_paired_rows(
             "mean_jerk_rms": float(np.mean([row["jerk_rms"] for row in method_rows])),
             "mean_solve_time": float(np.mean([row["mean_solve_time"] for row in method_rows])),
             "max_solve_time": float(np.max([row["max_solve_time"] for row in method_rows])),
+            "maximum_episode_p99_solve_time": float(np.max([
+                row.get("p99_solve_time", row["max_solve_time"])
+                for row in method_rows
+            ])),
             "gamma_updates_applied": sum(int(row["gamma_updates_applied"]) for row in method_rows),
             "gamma_updates_rejected": sum(int(row["gamma_updates_rejected"]) for row in method_rows),
             "reflex_interventions": sum(int(row["reflex_interventions"]) for row in method_rows),
@@ -405,6 +415,18 @@ def summarize_paired_rows(
             "minimum_optimal_decay": float(np.min([row["minimum_optimal_decay"] for row in method_rows])),
             "solver_failures": sum(int(row.get("solver_failures", 0)) for row in method_rows),
             "solver_rejections": sum(int(row.get("solver_rejections", 0)) for row in method_rows),
+            "solver_max_cpu_time_exits": sum(
+                int(row.get("solver_max_cpu_time_exits", 0))
+                for row in method_rows
+            ),
+            "solver_infeasible_exits": sum(
+                int(row.get("solver_infeasible_exits", 0))
+                for row in method_rows
+            ),
+            "solver_unknown_exits": sum(
+                int(row.get("solver_unknown_exits", 0))
+                for row in method_rows
+            ),
             "deadline_misses": sum(int(row.get("deadline_misses", 0)) for row in method_rows),
             "emergency_fallbacks": sum(int(row.get("emergency_fallbacks", 0)) for row in method_rows),
             "feedback_causal_opportunities": sum(

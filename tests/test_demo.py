@@ -14,15 +14,21 @@ def test_demo_config_validates_gamma() -> None:
         DemoConfig(gamma=0.0)
 
 
-def test_action_mapping_normalizes_paper_input_bounds() -> None:
+def test_action_mapping_converts_velocity_to_safe_panda_displacement() -> None:
     np = pytest.importorskip("numpy")
     action = paper_control_to_safe_panda_action((0.2, -0.1, 0.0, 1.0), 3)
-    assert action == pytest.approx(np.array([1.0, -0.5, 0.0]))
+    assert action == pytest.approx(np.array([0.16, -0.08, 0.0]))
 
 
 def test_action_mapping_appends_neutral_gripper() -> None:
     action = paper_control_to_safe_panda_action((0.2, 0.0, 0.0, 1.0), 4)
-    assert action == pytest.approx((1.0, 0.0, 0.0, 0.0))
+    assert action == pytest.approx((0.16, 0.0, 0.0, 0.0))
+
+
+@pytest.mark.parametrize("kwargs", [{"dt": 0.0}, {"action_displacement_scale": 0.0}])
+def test_action_mapping_rejects_invalid_time_or_displacement_scale(kwargs) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        paper_control_to_safe_panda_action((0.1, 0.0, 0.0, 0.0), 3, **kwargs)
 
 
 def test_cbf_builder_rejects_invalid_gamma() -> None:

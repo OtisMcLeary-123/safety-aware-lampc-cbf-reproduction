@@ -41,6 +41,7 @@ class RemediationBenchmarkConfig:
     max_collision_rate: float = 0.05
     max_solver_rejection_rate: float = 0.01
     max_deadline_miss_rate: float = 0.01
+    p99_solve_time_limit: float = 0.04
     min_causal_opportunity_rate: float = 0.80
 
     def __post_init__(self) -> None:
@@ -50,6 +51,8 @@ class RemediationBenchmarkConfig:
             raise ValueError("feedback_gamma must be in (0, 0.15]")
         if self.feedback_latency < 0.0 or self.feedback_ttc_threshold <= 0.0:
             raise ValueError("feedback latency/threshold are invalid")
+        if self.p99_solve_time_limit <= 0.0:
+            raise ValueError("p99_solve_time_limit must be positive")
         for value in (
             self.max_collision_rate,
             self.max_solver_rejection_rate,
@@ -132,7 +135,11 @@ def _run_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "minimum_true_clearance": result.minimum_true_clearance,
                 "mean_solve_time": result.mean_solve_time,
                 "max_solve_time": result.max_solve_time,
+                "p99_solve_time": result.p99_solve_time,
                 "solver_rejections": result.solver_rejections,
+                "solver_max_cpu_time_exits": result.solver_max_cpu_time_exits,
+                "solver_infeasible_exits": result.solver_infeasible_exits,
+                "solver_unknown_exits": result.solver_unknown_exits,
                 "deadline_misses": result.deadline_misses,
                 "feedback_causal_opportunity": result.feedback_causal_opportunity,
                 "gamma_updates_applied": result.gamma_updates_applied,
@@ -176,6 +183,18 @@ def summarize_remediation_rows(
                 int(row["deadline_misses"]) for row in selected
             ) / steps,
             "maximum_solve_time": max(float(row["max_solve_time"]) for row in selected),
+            "maximum_episode_p99_solve_time": max(
+                float(row["p99_solve_time"]) for row in selected
+            ),
+            "solver_max_cpu_time_exits": sum(
+                int(row["solver_max_cpu_time_exits"]) for row in selected
+            ),
+            "solver_infeasible_exits": sum(
+                int(row["solver_infeasible_exits"]) for row in selected
+            ),
+            "solver_unknown_exits": sum(
+                int(row["solver_unknown_exits"]) for row in selected
+            ),
             "causal_opportunity_rate": sum(
                 bool(row["feedback_causal_opportunity"]) for row in selected
             ) / len(selected) if variant.online_feedback else None,
@@ -193,7 +212,11 @@ def summarize_remediation_rows(
         "feasibility": (
             target["solver_rejection_rate"] <= config.max_solver_rejection_rate
         ),
-        "timing": target["deadline_miss_rate"] <= config.max_deadline_miss_rate,
+        "timing": (
+            target["deadline_miss_rate"] <= config.max_deadline_miss_rate
+            and target["maximum_episode_p99_solve_time"]
+            <= config.p99_solve_time_limit
+        ),
         "causal_opportunity": (
             target["causal_opportunity_rate"] >= config.min_causal_opportunity_rate
         ),

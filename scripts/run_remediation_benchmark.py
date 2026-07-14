@@ -16,6 +16,10 @@ from lampc_cbf.remediation_benchmark import (
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=("ablation", "development", "confirmatory"), default="ablation")
+    parser.add_argument(
+        "--episodes", type=int, default=None,
+        help="Override the stage count for deterministic smoke grids.",
+    )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=140)
     parser.add_argument("--feedback-latency", type=float, default=0.4971896839560941)
@@ -23,7 +27,9 @@ def main() -> int:
     parser.add_argument("--prerequisite-summary", default=None)
     args = parser.parse_args()
     counts = {"ablation": 20, "development": 100, "confirmatory": 500}
-    episodes = counts[args.stage]
+    episodes = counts[args.stage] if args.episodes is None else args.episodes
+    if episodes < 1:
+        raise SystemExit("episodes must be positive")
     prerequisite_defaults = {
         "development": "artifacts/remediation_ablation_20/summary.json",
         "confirmatory": "artifacts/remediation_development_100/summary.json",

@@ -86,8 +86,16 @@ def paper_control_to_safe_panda_action(
     action_dimension: int,
     *,
     linear_input_limit: float = 0.2,
+    dt: float = 0.04,
+    action_displacement_scale: float = 0.05,
 ) -> Any:
-    """Map paper-bounded inputs to Safe Panda's normalized action interval."""
+    """Map Cartesian velocity to Safe Panda's normalized displacement action.
+
+    Safe Panda interprets a normalized end-effector action as a Cartesian
+    displacement of ``action_displacement_scale`` metres per environment step.
+    The paper controller instead emits metres per second, so the velocity must
+    first be integrated over ``dt`` before normalization.
+    """
 
     import numpy as np
 
@@ -97,8 +105,17 @@ def paper_control_to_safe_panda_action(
         raise ValueError("Safe Panda action dimension must be 3 or 4")
     if linear_input_limit <= 0.0:
         raise ValueError("linear_input_limit must be positive")
+    if dt <= 0.0 or action_displacement_scale <= 0.0:
+        raise ValueError("dt and action_displacement_scale must be positive")
+    bounded_velocity = np.clip(
+        np.asarray(control[:3], dtype=float),
+        -linear_input_limit,
+        linear_input_limit,
+    )
     xyz = np.clip(
-        np.asarray(control[:3], dtype=float) / linear_input_limit, -1.0, 1.0
+        bounded_velocity * dt / action_displacement_scale,
+        -1.0,
+        1.0,
     )
     if action_dimension == 3:
         return xyz.astype(np.float32)
@@ -213,6 +230,7 @@ def run_safe_panda_mpc_cbf_demo(config: DemoConfig | None = None) -> DemoResult:
                 candidate,
                 env.action_space.shape[0],
                 linear_input_limit=mpc_config.linear_input_limit,
+                dt=mpc_config.dt,
             )
             observation, _, terminated, truncated, _ = env.step(action)
             previous_control = candidate

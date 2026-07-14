@@ -245,6 +245,7 @@ def run_dynamic_obstacle_demo(
                 candidate,
                 env.action_space.shape[0],
                 linear_input_limit=mpc_config.linear_input_limit,
+                dt=mpc_config.dt,
             )
             observation, _, terminated, truncated, _ = env.step(action)
             previous_control = candidate

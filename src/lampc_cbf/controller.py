@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import inf, pi
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 STATE_NAMES = ("x", "y", "z", "psi", "dx", "dy", "dz", "dpsi")
@@ -171,6 +171,7 @@ def build_mpc_controller(
     model_builders: Sequence[ModelBuilder] = (),
     constraint_builders: Sequence[ConstraintBuilder] = (),
     suppress_solver_output: bool = True,
+    nlpsol_options: Mapping[str, Any] | None = None,
 ) -> tuple[Any, Any]:
     """Build and set up the paper's discrete nonlinear MPC controller.
 
@@ -220,6 +221,8 @@ def build_mpc_controller(
             "ipopt.sb": "yes",
             "print_time": 0,
         }
+    if nlpsol_options is not None:
+        nlpsol_opts.update(dict(nlpsol_options))
     mpc.set_param(
         n_horizon=cfg.horizon,
         t_step=cfg.dt,

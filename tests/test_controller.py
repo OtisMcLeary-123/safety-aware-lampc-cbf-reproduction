@@ -137,3 +137,18 @@ def test_controller_builds_bounded_optimal_decay_input() -> None:
     assert model.u["cbf_decay"].shape == (1, 1)
     assert float(mpc.bounds["lower", "_u", "cbf_decay"]) == pytest.approx(0.2)
     assert float(mpc.bounds["upper", "_u", "cbf_decay"]) == pytest.approx(1.0)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("do_mpc") is None
+    or importlib.util.find_spec("casadi") is None,
+    reason="do-mpc/CasADi control extras are not installed",
+)
+def test_controller_accepts_explicit_ipopt_options() -> None:
+    _, mpc = build_mpc_controller(
+        PaperMPCConfig(horizon=2),
+        nlpsol_options={"ipopt.max_cpu_time": 0.035, "ipopt.max_iter": 17},
+    )
+
+    assert mpc.settings.nlpsol_opts["ipopt.max_cpu_time"] == pytest.approx(0.035)
+    assert mpc.settings.nlpsol_opts["ipopt.max_iter"] == 17
