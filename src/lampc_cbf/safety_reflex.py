@@ -89,6 +89,11 @@ class SafetyReflexConfig:
     recovery_clearance_slack: float = 0.005
     tangential_subgoal_enabled: bool = False
     tangential_subgoal_distance: float = 0.10
+    dpcbf_safety_scale: float = 1.05
+    dpcbf_lambda_gain: float = 0.10
+    dpcbf_mu_gain: float = 0.50
+    dpcbf_distance_epsilon: float = 0.10
+    dpcbf_velocity_epsilon: float = 0.05
 
     def __post_init__(self) -> None:
         if not isfinite(self.dt) or self.dt <= 0.0:
@@ -112,8 +117,15 @@ class SafetyReflexConfig:
             )
         if self.committed_backup_steps < 1:
             raise ValueError("committed_backup_steps must be positive")
-        if self.barrier_mode not in {"radial_cbf", "collision_cone"}:
-            raise ValueError("barrier_mode must be radial_cbf or collision_cone")
+        if self.barrier_mode not in {
+            "radial_cbf",
+            "collision_cone",
+            "dynamic_parabolic",
+        }:
+            raise ValueError(
+                "barrier_mode must be radial_cbf, collision_cone, or "
+                "dynamic_parabolic"
+            )
         if self.side_latch_steps < 1:
             raise ValueError("side_latch_steps must be positive")
         if any(
@@ -126,6 +138,11 @@ class SafetyReflexConfig:
                 self.policy_switch_penalty,
                 self.recovery_clearance_slack,
                 self.tangential_subgoal_distance,
+                self.dpcbf_lambda_gain,
+                self.dpcbf_mu_gain,
+                self.dpcbf_safety_scale,
+                self.dpcbf_distance_epsilon,
+                self.dpcbf_velocity_epsilon,
             )
         ):
             raise ValueError("policy-library parameters must be finite and non-negative")
@@ -134,8 +151,18 @@ class SafetyReflexConfig:
             for value in self.policy_speed_scales
         ):
             raise ValueError("policy_speed_scales must be non-empty values in (0, 1]")
-        if self.policy_library_enabled and self.barrier_mode != "collision_cone":
-            raise ValueError("policy_library_enabled requires collision_cone mode")
+        if self.dpcbf_safety_scale <= 1.0:
+            raise ValueError("dpcbf_safety_scale must be greater than one")
+        if self.dpcbf_distance_epsilon <= 0.0 or self.dpcbf_velocity_epsilon <= 0.0:
+            raise ValueError("DPCBF smoothing epsilons must be positive")
+        if self.policy_library_enabled and self.barrier_mode not in {
+            "collision_cone",
+            "dynamic_parabolic",
+        }:
+            raise ValueError(
+                "policy_library_enabled requires collision_cone or "
+                "dynamic_parabolic mode"
+            )
         if self.tangential_subgoal_enabled and not self.policy_library_enabled:
             raise ValueError("tangential subgoals require the policy library")
 
@@ -278,11 +305,78 @@ class OperationalSpaceSafetyReflex:
             + _norm(relative_velocity) * cone_tangent
         )
 
+    def dynamic_parabolic_residual(
+        self,
+        position: Sequence[float],
+        velocity: Sequence[float],
+        obstacle: ReflexObstacle,
+    ) -> float:
+        """Evaluate a Cartesian 3D adaptation of safe_control's DPCBF.
+
+        The original implementation is for a planar kinematic bicycle.  Here
+        the line-of-sight longitudinal speed is retained and its single lateral
+        component is generalized to the squared norm of the 3D perpendicular
+        relative velocity.  This is an experimental barrier ablation, not a
+        claim that the nonholonomic proof transfers to the Panda model.
+        """
+
+        point = _vector3(position, "position")
+        command = _vector3(velocity, "velocity")
+        line_of_sight = tuple(
+            obstacle_axis - robot_axis
+            for obstacle_axis, robot_axis in zip(obstacle.position, point)
+        )
+        distance = _norm(line_of_sight)
+        if distance <= 1e-12:
+            return -obstacle.robust_radius
+        los_unit = tuple(value / distance for value in line_of_sight)
+        relative_velocity = tuple(
+            obstacle_speed - robot_speed
+            for obstacle_speed, robot_speed in zip(obstacle.velocity, command)
+        )
+        longitudinal = _dot(relative_velocity, los_unit)
+        lateral_squared = max(
+            0.0,
+            _dot(relative_velocity, relative_velocity) - longitudinal**2,
+        )
+        scaled_radius = (
+            obstacle.robust_radius * self.config.dpcbf_safety_scale
+        )
+        smooth_clearance = sqrt(
+            max(
+                0.0,
+                distance**2
+                - scaled_radius**2
+                + self.config.dpcbf_distance_epsilon**2,
+            )
+        ) - self.config.dpcbf_distance_epsilon
+        smooth_speed = sqrt(
+            _dot(relative_velocity, relative_velocity)
+            + self.config.dpcbf_velocity_epsilon**2
+        )
+        adaptive_scale = (
+            sqrt(self.config.dpcbf_safety_scale**2 - 1.0) / scaled_radius
+        )
+        lambda_value = (
+            self.config.dpcbf_lambda_gain
+            * smooth_clearance
+            / smooth_speed
+            * adaptive_scale
+        )
+        mu_value = (
+            self.config.dpcbf_mu_gain
+            * smooth_clearance
+            * adaptive_scale
+        )
+        return longitudinal + lambda_value * lateral_squared + mu_value
+
     def barrier_residual(
         self, position: Sequence[float], velocity: Sequence[float], obstacle: ReflexObstacle
     ) -> float:
         if self.config.barrier_mode == "collision_cone":
             return self.collision_cone_residual(position, velocity, obstacle)
+        if self.config.barrier_mode == "dynamic_parabolic":
+            return self.dynamic_parabolic_residual(position, velocity, obstacle)
         return self.cbf_residual(position, velocity, obstacle)
 
     def _collision_cone_projection_candidates(
@@ -710,7 +804,7 @@ class OperationalSpaceSafetyReflex:
 
         point = _vector3(position, "position")
         velocity = self._limit(_vector3(nominal_velocity, "nominal_velocity"))
-        if self.config.barrier_mode == "collision_cone":
+        if self.config.barrier_mode in {"collision_cone", "dynamic_parabolic"}:
             for _ in range(self.config.projection_passes):
                 changed = False
                 for obstacle in obstacles:
@@ -850,7 +944,7 @@ class OperationalSpaceSafetyReflex:
             )
 
         if (
-            self.config.barrier_mode == "collision_cone"
+            self.config.barrier_mode in {"collision_cone", "dynamic_parabolic"}
             and (self.config.side_latch_enabled or self.config.policy_library_enabled)
         ):
             selected = self._select_collision_cone_policy(

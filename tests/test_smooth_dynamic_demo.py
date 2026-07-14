@@ -52,6 +52,15 @@ def test_dynamic_configuration_accepts_velocity_only_and_direct_target():
     assert config.reference_mode == "direct_target"
 
 
+def test_dynamic_configuration_accepts_experimental_dpcbf_reflex() -> None:
+    config = SmoothDynamicConfig(
+        reflex_barrier_mode="dynamic_parabolic",
+        reflex_side_latch_enabled=True,
+        reflex_policy_library_enabled=True,
+    )
+    assert config.reflex_barrier_mode == "dynamic_parabolic"
+
+
 def test_dynamic_configuration_validates_robot_velocity_estimator() -> None:
     assert SmoothDynamicConfig(robot_velocity_filter=1.0).robot_velocity_filter == 1.0
     with pytest.raises(ValueError, match="robot_velocity_filter"):

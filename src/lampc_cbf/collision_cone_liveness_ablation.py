@@ -63,66 +63,87 @@ class CollisionConeLivenessAblationConfig:
                 raise ValueError("rate gates must be in [0, 1]")
 
 
-def _run_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+def run_liveness_condition(
+    condition: Mapping[str, Any],
+    max_steps: int,
+    *,
+    variant_name: str,
+    barrier_mode: str,
+    side_latch: bool,
+    policy_library: bool,
+    tangential_subgoal: bool,
+) -> dict[str, Any]:
     from .smooth_dynamic_demo import SmoothDynamicConfig, run_smooth_dynamic_demo
 
+    result = run_smooth_dynamic_demo(
+        SmoothDynamicConfig(
+            delta_u_weight=2.0,
+            gamma=0.15,
+            seed=int(condition["seed"]),
+            max_steps=int(max_steps),
+            reference_speed=0.08,
+            reference_mode="straight",
+            safety_mode="cbf",
+            prediction_mode="velocity_tube",
+            safety_reflex_enabled=True,
+            optimal_decay_weight=10.0,
+            feedback_ttc_threshold=1.5,
+            feedback_response_latency=0.4971896839560941,
+            feedback_gamma=0.02,
+            reject_feedback_without_causal_opportunity=True,
+            safety_profile_recovery_enabled=True,
+            robot_velocity_feedback_enabled=True,
+            reflex_backup_selection="task_consistent",
+            reflex_committed_backup_enabled=True,
+            sampled_data_margin_enabled=True,
+            reflex_barrier_mode=barrier_mode,
+            reflex_side_latch_enabled=side_latch,
+            reflex_policy_library_enabled=policy_library,
+            reflex_tangential_subgoal_enabled=tangential_subgoal,
+            reflex_tangential_subgoal_distance=0.06,
+            obstacle_start_offset=(condition["lateral_offset"], 0.44, 0.0),
+            obstacle_velocity=(0.0, -condition["obstacle_speed"], 0.0),
+            save_animation=False,
+            save_plots=False,
+            save_metrics=False,
+            output_dir=f"/tmp/lampc-cone-liveness-{os.getpid()}",
+        )
+    )
+    return {
+        **condition,
+        "variant": variant_name,
+        "outcome": result.outcome,
+        "success": bool(result.reached_goal and not result.collision),
+        "collision": result.collision,
+        "steps": result.steps,
+        "minimum_true_clearance": result.minimum_true_clearance,
+        "final_goal_distance": result.final_goal_distance,
+        "net_goal_progress": result.net_goal_progress,
+        "reflex_interventions": result.reflex_interventions,
+        "reflex_backups": result.reflex_backups,
+        "reflex_side_switches": result.reflex_side_switches,
+        "reflex_policy_selections": result.reflex_policy_selections,
+        "reflex_robust_recoveries": result.reflex_robust_recoveries,
+        "solver_rejections": result.solver_rejections,
+        "deadline_misses": result.deadline_misses,
+        "p99_solve_time": result.p99_solve_time,
+    }
+
+
+def _run_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     condition = payload["condition"]
     rows: list[dict[str, Any]] = []
     for variant in VARIANTS:
-        result = run_smooth_dynamic_demo(
-            SmoothDynamicConfig(
-                delta_u_weight=2.0,
-                gamma=0.15,
-                seed=int(condition["seed"]),
-                max_steps=int(payload["max_steps"]),
-                reference_speed=0.08,
-                reference_mode="straight",
-                safety_mode="cbf",
-                prediction_mode="velocity_tube",
-                safety_reflex_enabled=True,
-                optimal_decay_weight=10.0,
-                feedback_ttc_threshold=1.5,
-                feedback_response_latency=0.4971896839560941,
-                feedback_gamma=0.02,
-                reject_feedback_without_causal_opportunity=True,
-                safety_profile_recovery_enabled=True,
-                robot_velocity_feedback_enabled=True,
-                reflex_backup_selection="task_consistent",
-                reflex_committed_backup_enabled=True,
-                sampled_data_margin_enabled=True,
-                reflex_barrier_mode="collision_cone",
-                reflex_side_latch_enabled=variant.side_latch,
-                reflex_policy_library_enabled=variant.policy_library,
-                reflex_tangential_subgoal_enabled=variant.tangential_subgoal,
-                reflex_tangential_subgoal_distance=0.06,
-                obstacle_start_offset=(condition["lateral_offset"], 0.44, 0.0),
-                obstacle_velocity=(0.0, -condition["obstacle_speed"], 0.0),
-                save_animation=False,
-                save_plots=False,
-                save_metrics=False,
-                output_dir=f"/tmp/lampc-cone-liveness-{os.getpid()}",
-            )
-        )
         rows.append(
-            {
-                **condition,
-                "variant": variant.name,
-                "outcome": result.outcome,
-                "success": bool(result.reached_goal and not result.collision),
-                "collision": result.collision,
-                "steps": result.steps,
-                "minimum_true_clearance": result.minimum_true_clearance,
-                "final_goal_distance": result.final_goal_distance,
-                "net_goal_progress": result.net_goal_progress,
-                "reflex_interventions": result.reflex_interventions,
-                "reflex_backups": result.reflex_backups,
-                "reflex_side_switches": result.reflex_side_switches,
-                "reflex_policy_selections": result.reflex_policy_selections,
-                "reflex_robust_recoveries": result.reflex_robust_recoveries,
-                "solver_rejections": result.solver_rejections,
-                "deadline_misses": result.deadline_misses,
-                "p99_solve_time": result.p99_solve_time,
-            }
+            run_liveness_condition(
+                condition,
+                int(payload["max_steps"]),
+                variant_name=variant.name,
+                barrier_mode="collision_cone",
+                side_latch=variant.side_latch,
+                policy_library=variant.policy_library,
+                tangential_subgoal=variant.tangential_subgoal,
+            )
         )
     return rows
 

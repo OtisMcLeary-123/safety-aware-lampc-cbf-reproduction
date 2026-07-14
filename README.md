@@ -221,6 +221,12 @@ from 77.3 mm to 198.8 mm. The target still had 17/20 safety timeouts and 383
 explicit robust-recovery steps, so this is evidence of improved liveness—not a
 formal robust-safety or task-completion claim.
 
+An experimental Cartesian adaptation of `safe_control` DPCBF was also tested
+after this gate passed. It failed the deterministic promotion grid with one
+stall in four scenes and 47.1 mm lower mean progress than the selected C3BF
+stack, so the DPCBF 20-episode run was not started. See the
+[DPCBF ablation report](docs/DPCBF_ABLATION.md).
+
 <details>
 <summary><strong>Additional experiment commands</strong></summary>
 

@@ -59,6 +59,9 @@ class SmoothDynamicConfig:
     reflex_recovery_clearance_slack: float = 0.005
     reflex_tangential_subgoal_enabled: bool = False
     reflex_tangential_subgoal_distance: float = 0.10
+    reflex_dpcbf_safety_scale: float = 1.05
+    reflex_dpcbf_lambda_gain: float = 0.10
+    reflex_dpcbf_mu_gain: float = 0.50
     avoidance_onset_threshold: float = 0.005
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
@@ -128,7 +131,11 @@ class SmoothDynamicConfig:
             raise ValueError("invalid reflex backup selection")
         if self.reflex_committed_backup_steps < 1:
             raise ValueError("reflex committed backup steps must be positive")
-        if self.reflex_barrier_mode not in {"radial_cbf", "collision_cone"}:
+        if self.reflex_barrier_mode not in {
+            "radial_cbf",
+            "collision_cone",
+            "dynamic_parabolic",
+        }:
             raise ValueError("invalid reflex barrier mode")
         if self.reflex_side_latch_steps < 1:
             raise ValueError("reflex side latch steps must be positive")
@@ -140,8 +147,13 @@ class SmoothDynamicConfig:
             not 0.0 < value <= 1.0 for value in self.reflex_policy_speed_scales
         ):
             raise ValueError("reflex policy speed scales must be in (0, 1]")
-        if self.reflex_policy_library_enabled and self.reflex_barrier_mode != "collision_cone":
-            raise ValueError("reflex policy library requires collision cone mode")
+        if self.reflex_policy_library_enabled and self.reflex_barrier_mode not in {
+            "collision_cone",
+            "dynamic_parabolic",
+        }:
+            raise ValueError(
+                "reflex policy library requires collision cone or DPCBF mode"
+            )
         if (
             self.reflex_tangential_subgoal_enabled
             and not self.reflex_policy_library_enabled
@@ -151,6 +163,10 @@ class SmoothDynamicConfig:
             raise ValueError("tangential subgoal distance must be non-negative")
         if self.reflex_recovery_clearance_slack < 0.0:
             raise ValueError("reflex recovery clearance slack must be non-negative")
+        if self.reflex_dpcbf_safety_scale <= 1.0:
+            raise ValueError("reflex DPCBF safety scale must exceed one")
+        if self.reflex_dpcbf_lambda_gain < 0.0 or self.reflex_dpcbf_mu_gain < 0.0:
+            raise ValueError("reflex DPCBF gains must be non-negative")
         if self.avoidance_onset_threshold <= 0.0:
             raise ValueError("avoidance_onset_threshold must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
@@ -813,6 +829,9 @@ def run_smooth_dynamic_demo(
                 tangential_subgoal_distance=(
                     cfg.reflex_tangential_subgoal_distance
                 ),
+                dpcbf_safety_scale=cfg.reflex_dpcbf_safety_scale,
+                dpcbf_lambda_gain=cfg.reflex_dpcbf_lambda_gain,
+                dpcbf_mu_gain=cfg.reflex_dpcbf_mu_gain,
             )
         )
         previous_control = np.zeros(4)

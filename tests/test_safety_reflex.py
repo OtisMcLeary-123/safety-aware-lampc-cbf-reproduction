@@ -165,6 +165,48 @@ def test_collision_cone_distinguishes_approaching_and_receding_motion():
     assert receding > 0.0
 
 
+def test_dynamic_parabolic_barrier_adapts_to_distance_and_lateral_motion():
+    reflex = _reflex(barrier_mode="dynamic_parabolic")
+    near = ReflexObstacle((0.06, 0.0, 0.0), (0.0, 0.0, 0.0), 0.05)
+    far = ReflexObstacle((1.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.05)
+
+    near_approach = reflex.dynamic_parabolic_residual(
+        (0.0, 0.0, 0.0), (0.2, 0.0, 0.0), near
+    )
+    far_approach = reflex.dynamic_parabolic_residual(
+        (0.0, 0.0, 0.0), (0.2, 0.0, 0.0), far
+    )
+    lateral = reflex.dynamic_parabolic_residual(
+        (0.0, 0.0, 0.0), (0.0, 0.2, 0.0), near
+    )
+    receding = reflex.dynamic_parabolic_residual(
+        (0.0, 0.0, 0.0), (-0.2, 0.0, 0.0), near
+    )
+
+    assert near_approach < 0.0
+    assert far_approach > near_approach
+    assert lateral > near_approach
+    assert receding > near_approach
+
+
+def test_dynamic_parabolic_policy_library_keeps_physical_rollout_safe():
+    reflex = _reflex(
+        barrier_mode="dynamic_parabolic",
+        side_latch_enabled=True,
+        policy_library_enabled=True,
+    )
+    obstacle = ReflexObstacle((0.08, 0.0, 0.0), (0.0, 0.0, 0.0), 0.05)
+
+    result = reflex.gate(
+        (0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (obstacle,),
+        goal_position=(0.3, 0.0, 0.0),
+    )
+
+    assert result.intervened
+    assert result.filtered_minimum_clearance >= 0.0
+    assert result.maximum_cbf_violation <= 1e-9
+
+
 def test_collision_cone_projection_is_safe_and_minimally_changes_nominal():
     reflex = _reflex(barrier_mode="collision_cone")
     obstacle = ReflexObstacle((0.2, 0.0, 0.0), (0.0, 0.0, 0.0), 0.05)
