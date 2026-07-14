@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
-from lampc_cbf.hf_llm import HFLLMConfig, HuggingFaceGammaMapper
+from lampc_cbf.hf_llm import GammaDecision, HFLLMConfig, HuggingFaceGammaMapper
 from lampc_cbf.nvidia_nim_gamma import NvidiaNIMGammaConfig, NvidiaNIMGammaMapper
 from lampc_cbf.paired_benchmark import PairedBenchmarkConfig, run_paired_benchmark
 
@@ -39,15 +40,30 @@ def main() -> int:
     )
     parser.add_argument("--llm-model", default=None)
     parser.add_argument("--llm-timeout", type=float, default=3.0)
+    parser.add_argument(
+        "--feedback-decision-json",
+        default=None,
+        help=(
+            "Use a previously validated GammaDecision JSON (or benchmark summary "
+            "containing feedback_decision) instead of calling a provider."
+        ),
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--no-resume", action="store_true")
     args = parser.parse_args()
     stage_episodes = {"smoke": 12, "development": 100, "confirmatory": 500}
     episodes = args.episodes or stage_episodes[args.stage]
     max_steps = args.max_steps or (220 if args.stage == "confirmatory" else 140)
-    output_dir = args.output_dir or f"artifacts/paired_benchmark_protocol_v3_{args.stage}_{episodes}"
+    output_dir = args.output_dir or f"artifacts/paired_benchmark_protocol_v4_{args.stage}_{episodes}"
 
-    if args.llm_provider == "nvidia-nim":
+    if args.feedback_decision_json:
+        decision_payload = json.loads(
+            Path(args.feedback_decision_json).read_text(encoding="utf-8")
+        )
+        if "feedback_decision" in decision_payload:
+            decision_payload = decision_payload["feedback_decision"]
+        feedback = GammaDecision(**decision_payload)
+    elif args.llm_provider == "nvidia-nim":
         defaults = NvidiaNIMGammaConfig()
         mapper = NvidiaNIMGammaMapper(
             NvidiaNIMGammaConfig(
@@ -63,11 +79,12 @@ def main() -> int:
                 timeout_seconds=args.llm_timeout,
             )
         )
-    feedback = mapper.infer_gamma(
-        "Watch out! I think the robot is going to crash soon. Increase clearance now.",
-        current_gamma=0.15,
-        feedback=True,
-    )
+    if not args.feedback_decision_json:
+        feedback = mapper.infer_gamma(
+            "Watch out! I think the robot is going to crash soon. Increase clearance now.",
+            current_gamma=0.15,
+            feedback=True,
+        )
     if feedback.fallback_used:
         raise RuntimeError(
             f"validated LLM feedback is required; inference failed with {feedback.error_type}"

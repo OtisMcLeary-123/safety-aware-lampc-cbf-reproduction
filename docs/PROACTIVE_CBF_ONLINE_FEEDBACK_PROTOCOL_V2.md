@@ -1,8 +1,9 @@
-# Proactive CBF and online-feedback protocol v3
+# Proactive CBF and online-feedback protocol v4
 
-Version 3 adds the preregistered joint-success efficacy gate and freezes the
-confirmatory completion budget at 220 steps. It uses a new artifact namespace
-and refuses to resume protocol-v2 checkpoints.
+Version 4 aligns the primary efficacy contrast with the paper controller and
+adds an explicit formal-scope audit. It uses a new artifact namespace and
+refuses to resume older checkpoints. The 220-step confirmatory completion
+budget remains frozen.
 
 This protocol addresses two contradictions observed in the first 500-condition
 benchmark: smaller static gamma did not improve safety in aggregate, and delayed
@@ -39,7 +40,11 @@ gamma.
 `paper_fidelity` uses the published-like direct target reference, delta-u weight
 0.5, static obstacle within the horizon, and no reflex or optimal-decay
 extension. It contains the distance baseline and fixed gamma 0.15 versus
-proactive gamma 0.02 comparison.
+proactive gamma 0.02 comparison. It now also contains
+`paper_async_feedback_static`, which is identical to fixed gamma 0.15 until the
+randomly scheduled language update becomes available after measured LLM
+latency. This elapsed-time update mirrors the paper experiment; it does not use
+the TTC trigger or provisional local profile.
 
 `robust_extension` is labeled separately and uses the straight moving reference,
 delta-u weight 2.0, and explicit extensions. The prediction ablation is:
@@ -61,11 +66,12 @@ profile containing gamma, clearance margin, and reference-speed scale. TTC has
 priority over language preference. Solver infeasibility never requests a
 smaller gamma; it switches to the gatekeeper.
 
-The online method defaults to a TTC trigger rather than a random elapsed-time
-trigger. At threshold crossing it applies a deterministic provisional cautious
-profile immediately. The async gamma result is applied after its measured
-latency and clears the provisional profile. Each row records trigger time,
-availability time, whether the update had causal opportunity
+The paper-fidelity online method always uses the preregistered random elapsed-time
+intervention. The robust-extension online method defaults to a TTC trigger. At
+threshold crossing it applies a deterministic provisional cautious profile
+immediately. The async gamma result is applied after its measured latency and
+clears the provisional profile. Each row records trigger time, availability
+time, whether the update had causal opportunity
 (`TTC > latency + reaction margin`), and whether an update was applied.
 
 The old elapsed-time schedule remains available for backward-compatible
@@ -97,8 +103,11 @@ joint_success = outcome == goal AND reached_goal AND NOT collision
 Every other terminal outcome is a failure, including `timeout`,
 `safety_timeout`, `controller_stall`, `solver_failure`, `emergency_fallback`,
 and `environment_truncated`. The preregistered primary contrast is
-`robust_stack_async_feedback` against `robust_stack_fixed_g015` on identical
-episode IDs, seeds, obstacle speeds, offsets, and intervention conditions.
+`paper_async_feedback_static` against `fixed_cbf_static_g015` on identical
+episode IDs, seeds, obstacle speeds, offsets, and intervention conditions. This
+is the only contrast used by the confirmatory efficacy gate. The robust-stack
+online-versus-fixed contrast remains a labeled secondary analysis and cannot
+substitute for the paper claim.
 
 The confirmatory efficacy gate passes only when all three checks hold:
 
@@ -115,5 +124,40 @@ override is recorded in the run configuration and must not be used after
 confirmatory data have been inspected.
 
 Safety metrics always use raw simulated trajectories. Visual smoothing remains
-presentation-only. Monte Carlo results do not establish formal whole-body
-Panda safety under unbounded Gaussian noise.
+presentation-only.
+
+## Formal-scope audit
+
+Following the reference MPC-CBF implementations, every CBF episode now records
+the true-state barrier and the applied one-step residual
+
+```text
+h_true[k+1] - omega[k] * (1 - gamma[k]) * h_true[k]
+```
+
+where `omega=1` for fixed decay. A nonnegative sampled residual is necessary
+evidence for the discrete CBF condition, but it is not by itself a formal proof.
+The report marks a stepwise certificate eligible only if all of these checks
+hold for the full episode:
+
+1. the initial true state is in the safe set;
+2. every raw true-state CBF residual passes tolerance;
+3. observation error is zero or deterministically bounded;
+4. the executed input is the accepted MPC input, without reflex or fallback;
+5. model transition and action tracking match the certified model tolerance.
+
+Recursive-certificate eligibility additionally requires a certified terminal
+safe set or an invariant backup controller. The current Panda controller has
+neither, so protocol v4 always reports recursive eligibility as false. The
+Gaussian sensor noise is unbounded, and the operational-space reflex does not
+certify whole-body Panda collision avoidance. Consequently, the 500-episode
+benchmark remains empirical evidence even when it has zero collisions.
+
+The implementation choices were checked against the primary repositories
+[HybridRobotics/MPC-CBF](https://github.com/HybridRobotics/MPC-CBF),
+[tkkim-robot/safe_control](https://github.com/tkkim-robot/safe_control),
+[learnsyslab/safe-control-gym](https://github.com/learnsyslab/safe-control-gym),
+and [CBFKit](https://github.com/bardhh/cbfkit). Their controller code motivates
+the separation between a finite-horizon CBF constraint, feasibility-enhancing
+optimal decay, disturbance-aware filters, and terminal/backup invariance; none
+of those properties is inherited merely by reusing a class name or equation.

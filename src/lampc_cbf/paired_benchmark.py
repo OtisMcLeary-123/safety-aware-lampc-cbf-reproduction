@@ -29,12 +29,12 @@ class PairedBenchmarkConfig:
     lateral_upper: float = 0.080
     intervention_time_lower: float = 0.0
     intervention_time_upper: float = 0.40
-    output_dir: str = "artifacts/paired_benchmark_protocol_v3_500"
+    output_dir: str = "artifacts/paired_benchmark_protocol_v4_500"
     resume: bool = True
     feedback_schedule_mode: str = "ttc"
     feedback_ttc_threshold: float = 1.5
-    efficacy_method: str = "robust_stack_async_feedback"
-    efficacy_comparator: str = "robust_stack_fixed_g015"
+    efficacy_method: str = "paper_async_feedback_static"
+    efficacy_comparator: str = "fixed_cbf_static_g015"
     efficacy_alpha: float = 0.05
     efficacy_minimum_paired_difference: float = 0.0
 
@@ -75,12 +75,18 @@ class BenchmarkMethod:
     delta_u_weight: float = 0.5
     reference_mode: str = "direct_target"
     provisional_local_feedback: bool = False
+    feedback_trigger_mode: str = "configured"
 
 
 METHODS: tuple[BenchmarkMethod, ...] = (
     BenchmarkMethod("distance_static", "distance", 0.15, "static", False),
     BenchmarkMethod("fixed_cbf_static_g015", "cbf", 0.15, "static", False),
     BenchmarkMethod("proactive_cbf_static_g002", "cbf", 0.02, "static", False),
+    BenchmarkMethod(
+        "paper_async_feedback_static", "cbf", 0.15, "static", False,
+        online_feedback=True, comparator="fixed_cbf_static_g015",
+        feedback_trigger_mode="elapsed_time",
+    ),
     BenchmarkMethod(
         "robust_static_g002", "cbf", 0.02, "static", False,
         comparator="robust_static_g002",
@@ -212,13 +218,18 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     feedback_latency = float(payload["feedback_latency"])
     feedback_schedule_mode = str(payload.get("feedback_schedule_mode", "ttc"))
     feedback_ttc_threshold = float(payload.get("feedback_ttc_threshold", 1.5))
-    protocol_version = int(payload.get("protocol_version", 3))
+    protocol_version = int(payload.get("protocol_version", 4))
     benchmark_stage = str(payload.get("benchmark_stage", "confirmatory"))
     rows: list[dict[str, Any]] = []
     for method in METHODS:
+        method_feedback_mode = (
+            feedback_schedule_mode
+            if method.feedback_trigger_mode == "configured"
+            else method.feedback_trigger_mode
+        )
         schedule: tuple[tuple[float, float], ...] = ()
         if method.online_feedback:
-            if feedback_schedule_mode == "elapsed_time":
+            if method_feedback_mode == "elapsed_time":
                 schedule = ((condition["intervention_time"] + feedback_latency, feedback_gamma),)
         config = SmoothDynamicConfig(
             delta_u_weight=method.delta_u_weight,
@@ -235,18 +246,18 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             provisional_feedback_times=(
                 (condition["intervention_time"],)
                 if method.provisional_local_feedback
-                and feedback_schedule_mode == "elapsed_time"
+                and method_feedback_mode == "elapsed_time"
                 else ()
             ),
             feedback_ttc_threshold=(
                 feedback_ttc_threshold
-                if method.online_feedback and feedback_schedule_mode == "ttc"
+                if method.online_feedback and method_feedback_mode == "ttc"
                 else None
             ),
             feedback_response_latency=feedback_latency,
             feedback_gamma=(
                 feedback_gamma
-                if method.online_feedback and feedback_schedule_mode == "ttc"
+                if method.online_feedback and method_feedback_mode == "ttc"
                 else None
             ),
             gamma_update_ttl=1.0,
@@ -258,6 +269,33 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             output_dir=f"/tmp/lampc-paired-{os.getpid()}",
         )
         result = run_smooth_dynamic_demo(config)
+        formal_exact_or_bounded_observation = bool(
+            config.measurement_noise_sigma == 0.0
+            and config.sensor_period <= 0.04 + 1e-12
+        )
+        formal_applied_input_matches_mpc = bool(
+            result.reflex_interventions == 0
+            and result.solver_rejections == 0
+            and result.emergency_fallbacks == 0
+        )
+        formal_model_match_verified = bool(
+            result.max_model_transition_error <= 1e-6
+            and result.max_action_tracking_error <= 1e-6
+        )
+        formal_initial_safe = result.initial_true_barrier >= 0.0
+        formal_raw_discrete_cbf_satisfied = bool(
+            method.safety_mode == "cbf" and result.true_cbf_violation_steps == 0
+        )
+        formal_stepwise_certificate_eligible = all(
+            (
+                method.safety_mode == "cbf",
+                formal_initial_safe,
+                formal_raw_discrete_cbf_satisfied,
+                formal_exact_or_bounded_observation,
+                formal_applied_input_matches_mpc,
+                formal_model_match_verified,
+            )
+        )
         rows.append(
             {
                 **condition,
@@ -281,6 +319,10 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "steps": result.steps,
                 "minimum_true_clearance": result.minimum_true_clearance,
                 "minimum_measured_clearance": result.minimum_measured_clearance,
+                "initial_true_barrier": result.initial_true_barrier,
+                "minimum_true_barrier": result.minimum_true_barrier,
+                "minimum_true_cbf_residual": result.minimum_true_cbf_residual,
+                "true_cbf_violation_steps": result.true_cbf_violation_steps,
                 "final_goal_distance": result.final_goal_distance,
                 "initial_goal_distance": result.initial_goal_distance,
                 "net_goal_progress": result.net_goal_progress,
@@ -301,7 +343,7 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "avoidance_onset_time": result.avoidance_onset_time,
                 "minimum_predicted_ttc": result.minimum_predicted_ttc,
                 "feedback_latency": feedback_latency if method.online_feedback else 0.0,
-                "feedback_schedule_mode": feedback_schedule_mode,
+                "feedback_schedule_mode": method_feedback_mode,
                 "feedback_trigger_time": result.feedback_trigger_time,
                 "feedback_available_time": result.feedback_available_time,
                 "feedback_causal_opportunity": result.feedback_causal_opportunity,
@@ -320,6 +362,20 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "max_model_transition_error": result.max_model_transition_error,
                 "mean_action_tracking_error": result.mean_action_tracking_error,
                 "max_action_tracking_error": result.max_action_tracking_error,
+                "formal_initial_safe": formal_initial_safe,
+                "formal_raw_discrete_cbf_satisfied": (
+                    formal_raw_discrete_cbf_satisfied
+                ),
+                "formal_exact_or_bounded_observation": (
+                    formal_exact_or_bounded_observation
+                ),
+                "formal_applied_input_matches_mpc": formal_applied_input_matches_mpc,
+                "formal_model_match_verified": formal_model_match_verified,
+                "formal_terminal_safe_set_or_backup_certified": False,
+                "formal_stepwise_certificate_eligible": (
+                    formal_stepwise_certificate_eligible
+                ),
+                "formal_recursive_certificate_eligible": False,
                 **result.smoothness.as_dict(),
             }
         )
@@ -334,7 +390,13 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
     typed: list[dict[str, Any]] = []
     boolean_fields = {
         "joint_success", "success", "reached_goal", "collision",
-        "feedback_causal_opportunity"
+        "feedback_causal_opportunity", "formal_initial_safe",
+        "formal_raw_discrete_cbf_satisfied",
+        "formal_exact_or_bounded_observation",
+        "formal_applied_input_matches_mpc", "formal_model_match_verified",
+        "formal_terminal_safe_set_or_backup_certified",
+        "formal_stepwise_certificate_eligible",
+        "formal_recursive_certificate_eligible",
     }
     integer_fields = {
         "protocol_version", "max_steps_budget", "episode", "seed", "steps",
@@ -346,6 +408,7 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
         "emergency_fallbacks", "feedback_updates_rejected_late",
         "most_infeasible_stage", "infeasible_stage_events",
         "safety_profile_transitions",
+        "true_cbf_violation_steps",
     }
     text_fields = {
         "benchmark_stage", "method", "comparator", "experiment_profile", "outcome",
@@ -465,6 +528,32 @@ def summarize_paired_rows(
                 )
             },
             "mean_minimum_true_clearance": float(np.mean(clearance)),
+            "minimum_raw_true_barrier": (
+                float(np.min([
+                    row["minimum_true_barrier"] for row in method_rows
+                    if row.get("minimum_true_barrier") is not None
+                ]))
+                if any(
+                    row.get("minimum_true_barrier") is not None
+                    for row in method_rows
+                )
+                else None
+            ),
+            "minimum_raw_true_cbf_residual": (
+                float(np.min([
+                    row["minimum_true_cbf_residual"] for row in method_rows
+                    if row.get("minimum_true_cbf_residual") is not None
+                ]))
+                if any(
+                    row.get("minimum_true_cbf_residual") is not None
+                    for row in method_rows
+                )
+                else None
+            ),
+            "raw_true_cbf_violation_steps": sum(
+                int(row.get("true_cbf_violation_steps", 0))
+                for row in method_rows
+            ),
             "paired_clearance_difference_95_ci": list(clearance_difference_ci),
             "median_avoidance_onset_time": float(np.median([
                 row["avoidance_onset_time"] for row in method_rows
@@ -522,6 +611,42 @@ def summarize_paired_rows(
                 for row in method_rows
             ),
             "experiment_profile": method.experiment_profile,
+            "formal_scope_audit": {
+                "stepwise_certificate_eligible_episodes": sum(
+                    bool(row.get("formal_stepwise_certificate_eligible", False))
+                    for row in method_rows
+                ),
+                "recursive_certificate_eligible_episodes": sum(
+                    bool(row.get("formal_recursive_certificate_eligible", False))
+                    for row in method_rows
+                ),
+                "initial_safe_episodes": sum(
+                    bool(row.get("formal_initial_safe", False))
+                    for row in method_rows
+                ),
+                "raw_discrete_cbf_satisfied_episodes": sum(
+                    bool(row.get("formal_raw_discrete_cbf_satisfied", False))
+                    for row in method_rows
+                ),
+                "exact_or_bounded_observation_episodes": sum(
+                    bool(row.get("formal_exact_or_bounded_observation", False))
+                    for row in method_rows
+                ),
+                "applied_input_matches_mpc_episodes": sum(
+                    bool(row.get("formal_applied_input_matches_mpc", False))
+                    for row in method_rows
+                ),
+                "model_match_verified_episodes": sum(
+                    bool(row.get("formal_model_match_verified", False))
+                    for row in method_rows
+                ),
+                "terminal_safe_set_or_backup_certified_episodes": sum(
+                    bool(row.get(
+                        "formal_terminal_safe_set_or_backup_certified", False
+                    ))
+                    for row in method_rows
+                ),
+            },
         }
     adjusted = _holm_adjust(raw_pvalues)
     for name, value in adjusted.items():
@@ -565,6 +690,30 @@ def evaluate_confirmatory_efficacy_gate(
         "paper_reported_absolute_improvement": 0.34,
         "paper_effect_size_reached": difference >= 0.34,
         "checks": checks,
+    }
+
+
+def evaluate_secondary_robust_contrast(
+    summaries: Mapping[str, Mapping[str, Any]],
+    config: PairedBenchmarkConfig,
+) -> dict[str, Any]:
+    """Report the robust-stack feedback contrast without making it the paper gate."""
+
+    method_name = "robust_stack_async_feedback"
+    comparator_name = "robust_stack_fixed_g015"
+    method = summaries[method_name]
+    if method.get("comparator") != comparator_name:
+        raise ValueError("robust extension comparator is not isolated")
+    difference = float(method["paired_success_difference"])
+    lower, upper = (float(value) for value in method["paired_success_difference_95_ci"])
+    return {
+        "evaluated_as_gate": False,
+        "method": method_name,
+        "comparator": comparator_name,
+        "paired_joint_success_difference": difference,
+        "paired_joint_success_difference_95_ci": [lower, upper],
+        "exact_two_sided_mcnemar_p": float(method["mcnemar_exact_p"]),
+        "reason": "robust extension is secondary and cannot replace the paper-fidelity claim",
     }
 
 
@@ -614,7 +763,7 @@ def run_paired_benchmark(
     csv_path = root / "episodes.csv"
     rows = _read_checkpoint(csv_path) if cfg.resume else []
     if rows and any(
-        int(row.get("protocol_version", -1)) != 3
+        int(row.get("protocol_version", -1)) != 4
         or row.get("benchmark_stage") != cfg.stage
         or int(row.get("max_steps_budget", -1)) != cfg.max_steps
         for row in rows
@@ -642,7 +791,7 @@ def run_paired_benchmark(
             "feedback_latency": feedback_decision.latency_seconds,
             "feedback_schedule_mode": cfg.feedback_schedule_mode,
             "feedback_ttc_threshold": cfg.feedback_ttc_threshold,
-            "protocol_version": 3,
+            "protocol_version": 4,
             "benchmark_stage": cfg.stage,
         }
         for condition in conditions
@@ -666,12 +815,14 @@ def run_paired_benchmark(
                     print(f"[paired] completed {len(complete) + index}/{cfg.episodes}", flush=True)
     summaries = summarize_paired_rows(rows, cfg)
     efficacy_gate = evaluate_confirmatory_efficacy_gate(summaries, cfg)
+    secondary_robust_contrast = evaluate_secondary_robust_contrast(summaries, cfg)
     summary = {
-        "study_id": f"safe-panda-paired-protocol-v3-{cfg.episodes}",
-        "protocol_version": 3,
+        "study_id": f"safe-panda-paired-protocol-v4-{cfg.episodes}",
+        "protocol_version": 4,
         "config": asdict(cfg),
         "methods": summaries,
         "efficacy_gate": efficacy_gate,
+        "secondary_robust_contrast": secondary_robust_contrast,
         "feedback_decision": feedback_decision.as_dict(),
         "paired_randomization": True,
         "common_random_numbers": True,
@@ -687,8 +838,13 @@ def run_paired_benchmark(
             ),
         },
         "formal_scope": (
-            "Monte Carlo evidence only; Gaussian noise is not deterministically bounded "
-            "and operational-space reflex does not certify whole-body Panda safety."
+            "The raw true-state discrete-CBF residual is audited, but Monte Carlo is not "
+            "a proof. Stepwise eligibility requires exact or deterministically bounded "
+            "observations, verified model/action matching, accepted MPC input, initial "
+            "safe-set membership, and nonnegative raw residual. Recursive eligibility "
+            "also requires a certified terminal safe set or invariant backup controller; "
+            "the current Panda controller has neither. Gaussian noise and the operational-"
+            "space reflex do not certify whole-body Panda safety."
         ),
     }
     (root / "benchmark_summary.json").write_text(

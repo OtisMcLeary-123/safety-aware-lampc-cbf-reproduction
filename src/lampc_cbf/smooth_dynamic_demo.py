@@ -223,6 +223,10 @@ class SmoothDynamicResult:
     sensor_updates: int
     minimum_true_clearance: float
     minimum_measured_clearance: float
+    initial_true_barrier: float
+    minimum_true_barrier: float
+    minimum_true_cbf_residual: float | None
+    true_cbf_violation_steps: int
     final_goal_distance: float
     initial_goal_distance: float
     net_goal_progress: float
@@ -695,6 +699,8 @@ def run_smooth_dynamic_demo(
     nominal_controls: list[Any] = []
     true_clearances: list[float] = []
     measured_clearances: list[float] = []
+    true_barriers: list[float] = []
+    true_cbf_residuals: list[float] = []
     goal_distances: list[float] = []
     solve_times: list[float] = []
     predicted_ttc_values: list[float] = []
@@ -730,6 +736,11 @@ def run_smooth_dynamic_demo(
         observation = env._get_obs()
 
         combined_radius = cfg.obstacle_radius + cfg.collision_radius
+        initial_true_barrier = float(
+            np.dot(start - true_obstacle, start - true_obstacle)
+            - combined_radius**2
+        )
+        true_barriers.append(initial_true_barrier)
         if cfg.reference_mode in {"straight", "direct_target"}:
             route_points = np.asarray([start, goal])
             reference_path = np.linspace(start, goal, 600)
@@ -1220,6 +1231,9 @@ def run_smooth_dynamic_demo(
                         }
                     )
             pre_step_position = position.copy()
+            pre_step_obstacle = true_obstacle.copy()
+            applied_gamma = float(tvp.gamma)
+            applied_decay = float(optimal_decay_trace[-1])
             model_velocity = feedback_velocity.copy()
             action = paper_control_to_safe_panda_action(
                 candidate, env.action_space.shape[0],
@@ -1250,6 +1264,21 @@ def run_smooth_dynamic_demo(
             true_clearance = float(
                 np.linalg.norm(position - true_obstacle) - combined_radius
             )
+            current_true_barrier = float(
+                np.dot(
+                    pre_step_position - pre_step_obstacle,
+                    pre_step_position - pre_step_obstacle,
+                )
+                - combined_radius**2
+            )
+            next_true_barrier = float(
+                np.dot(position - true_obstacle, position - true_obstacle)
+                - combined_radius**2
+            )
+            true_cbf_residual = float(
+                next_true_barrier
+                - applied_decay * (1.0 - applied_gamma) * current_true_barrier
+            )
             measured_clearance = float(
                 np.linalg.norm(position - measurement) - combined_radius
             )
@@ -1268,6 +1297,9 @@ def run_smooth_dynamic_demo(
             nominal_controls.append(nominal_candidate)
             true_clearances.append(true_clearance)
             measured_clearances.append(measured_clearance)
+            true_barriers.append(next_true_barrier)
+            if cfg.safety_mode == "cbf":
+                true_cbf_residuals.append(true_cbf_residual)
             goal_distances.append(goal_distance)
             gamma_trace.append(tvp.gamma)
             runtime_trace.append(
@@ -1287,6 +1319,11 @@ def run_smooth_dynamic_demo(
                     "hazard_clear_elapsed": hazard_clear_elapsed,
                     "observed_velocity": observed_velocity.tolist(),
                     "commanded_velocity": candidate[:3].tolist(),
+                    "true_barrier": next_true_barrier,
+                    "true_cbf_residual": (
+                        true_cbf_residual if cfg.safety_mode == "cbf" else None
+                    ),
+                    "applied_cbf_decay": applied_decay,
                     "goal_distance": goal_distance,
                     "net_goal_progress": net_progress,
                     "mean_goal_progress_rate": net_progress / elapsed_after_step,
@@ -1386,6 +1423,15 @@ def run_smooth_dynamic_demo(
             sensor_updates=len(sensor_update_steps),
             minimum_true_clearance=float(min(true_clearances)),
             minimum_measured_clearance=float(min(measured_clearances)),
+            initial_true_barrier=initial_true_barrier,
+            minimum_true_barrier=float(min(true_barriers)),
+            minimum_true_cbf_residual=(
+                float(min(true_cbf_residuals)) if true_cbf_residuals else None
+            ),
+            true_cbf_violation_steps=sum(
+                residual < -cfg.solver_max_constraint_violation
+                for residual in true_cbf_residuals
+            ),
             final_goal_distance=final_goal_distance,
             initial_goal_distance=initial_goal_distance,
             net_goal_progress=net_goal_progress,
@@ -1507,6 +1553,8 @@ def run_smooth_dynamic_demo(
             "optimal_decay_trace": optimal_decay_trace,
             "true_clearances": true_clearances,
             "measured_clearances": measured_clearances,
+            "true_barriers": true_barriers,
+            "true_cbf_residuals": true_cbf_residuals,
             "goal_distances": goal_distances,
             "predicted_ttc_values": predicted_ttc_values,
             "solve_times": solve_times,

@@ -14,12 +14,15 @@ def test_default_protocol_has_500_common_conditions_and_isolates_feedback():
     assert config.stage == "confirmatory"
     assert config.episodes == 500
     assert config.bootstrap_resamples == 10_000
-    feedback = next(method for method in METHODS if method.online_feedback)
+    assert config.efficacy_method == "paper_async_feedback_static"
+    assert config.efficacy_comparator == "fixed_cbf_static_g015"
+    feedback = next(method for method in METHODS if method.name == config.efficacy_method)
     fixed = next(method for method in METHODS if method.name == feedback.comparator)
     assert feedback.gamma == fixed.gamma == pytest.approx(0.15)
-    assert feedback.prediction_mode == fixed.prediction_mode == "velocity_tube"
+    assert feedback.prediction_mode == fixed.prediction_mode == "static"
     assert feedback.safety_reflex_enabled == fixed.safety_reflex_enabled
     assert feedback.optimal_decay_weight == fixed.optimal_decay_weight
+    assert feedback.feedback_trigger_mode == "elapsed_time"
 
 
 def test_protocol_separates_paper_fidelity_from_robust_extension():
@@ -49,6 +52,9 @@ def _row(method, episode, success):
         "reached_goal": success,
         "collision": False,
         "minimum_true_clearance": 0.01 if success else -0.01,
+        "minimum_true_barrier": 0.001 if success else -0.001,
+        "minimum_true_cbf_residual": 0.0001 if method.safety_mode == "cbf" else None,
+        "true_cbf_violation_steps": 0,
         "avoidance_onset_time": 0.2,
         "minimum_predicted_ttc": 0.4,
         "path_length": 0.3,
@@ -61,6 +67,14 @@ def _row(method, episode, success):
         "reflex_backups": 0,
         "mean_optimal_decay": 0.99 if method.optimal_decay_weight else 1.0,
         "minimum_optimal_decay": 0.95 if method.optimal_decay_weight else 1.0,
+        "formal_initial_safe": True,
+        "formal_raw_discrete_cbf_satisfied": method.safety_mode == "cbf",
+        "formal_exact_or_bounded_observation": False,
+        "formal_applied_input_matches_mpc": not method.safety_reflex_enabled,
+        "formal_model_match_verified": False,
+        "formal_terminal_safe_set_or_backup_certified": False,
+        "formal_stepwise_certificate_eligible": False,
+        "formal_recursive_certificate_eligible": False,
     }
 
 
@@ -106,7 +120,7 @@ def test_confirmatory_efficacy_gate_requires_paired_superiority(tmp_path):
     rows = []
     for episode in range(20):
         for method in METHODS:
-            success = method.name == "robust_stack_async_feedback"
+            success = method.name == "paper_async_feedback_static"
             rows.append(_row(method, episode, success))
     config = PairedBenchmarkConfig(
         stage="confirmatory", episodes=20, bootstrap_resamples=200,
@@ -117,6 +131,19 @@ def test_confirmatory_efficacy_gate_requires_paired_superiority(tmp_path):
     assert gate["passed"] is True
     assert gate["paired_joint_success_difference"] == pytest.approx(1.0)
     assert gate["checks"]["bootstrap_95_ci_lower_above_margin"] is True
+
+
+def test_summary_does_not_promote_empirical_safety_to_formal_certificate(tmp_path):
+    rows = [_row(method, 0, True) for method in METHODS]
+    config = PairedBenchmarkConfig(
+        episodes=1, bootstrap_resamples=20, workers=1, output_dir=str(tmp_path)
+    )
+    summary = summarize_paired_rows(rows, config)
+    audit = summary["fixed_cbf_static_g015"]["formal_scope_audit"]
+    assert audit["initial_safe_episodes"] == 1
+    assert audit["raw_discrete_cbf_satisfied_episodes"] == 1
+    assert audit["stepwise_certificate_eligible_episodes"] == 0
+    assert audit["recursive_certificate_eligible_episodes"] == 0
 
 
 def test_development_reports_but_does_not_apply_efficacy_gate(tmp_path):
