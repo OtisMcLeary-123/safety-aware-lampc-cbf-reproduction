@@ -72,6 +72,7 @@ class SafetyReflexConfig:
     projection_passes: int = 8
     feasibility_tolerance: float = 1e-9
     uncertainty_growth_per_second: float = 0.035
+    backup_selection: str = "task_consistent"
 
     def __post_init__(self) -> None:
         if not isfinite(self.dt) or self.dt <= 0.0:
@@ -88,6 +89,10 @@ class SafetyReflexConfig:
             raise ValueError("reflex parameters must be finite and non-negative")
         if self.cbf_alpha == 0.0 or self.speed_limit == 0.0:
             raise ValueError("cbf_alpha and speed_limit must be positive")
+        if self.backup_selection not in {"max_clearance", "task_consistent"}:
+            raise ValueError(
+                "backup_selection must be max_clearance or task_consistent"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,10 +288,29 @@ class OperationalSpaceSafetyReflex:
             and item[1] <= self.config.feasibility_tolerance
         ]
         if feasible:
-            backup_clearance, backup_violation, backup = max(
-                feasible, key=lambda item: item[0]
-            )
-            reason = "escape_policy"
+            if self.config.backup_selection == "max_clearance":
+                backup_clearance, backup_violation, backup = max(
+                    feasible, key=lambda item: item[0]
+                )
+                reason = "max_clearance_escape"
+            else:
+                # OSCBF-style task consistency: safety is a hard filter above,
+                # then the objective minimally changes the nominal task command.
+                # Clearance is only a deterministic tie-break, never the primary
+                # objective, so the reflex does not unnecessarily drive away
+                # from the goal after several commands are already safe.
+                backup_clearance, backup_violation, backup = min(
+                    feasible,
+                    key=lambda item: (
+                        sum(
+                            (value - target) ** 2
+                            for value, target in zip(item[2], nominal)
+                        ),
+                        -item[0],
+                        item[2],
+                    ),
+                )
+                reason = "task_consistent_escape"
         else:
             backup_clearance, backup_violation, backup = max(
                 evaluated, key=lambda item: (item[0], -item[1], _norm(item[2]))

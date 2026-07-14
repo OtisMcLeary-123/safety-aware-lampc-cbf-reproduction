@@ -48,9 +48,34 @@ def test_gatekeeper_uses_backup_when_short_rollout_remains_unsafe():
     stationary_clearance = reflex.rollout_minimum_clearance(
         (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (obstacle,)
     )
-    assert result.reason == "escape_policy"
+    assert result.reason == "task_consistent_escape"
     assert result.velocity != pytest.approx((0.0, 0.0, 0.0))
     assert result.filtered_minimum_clearance > stationary_clearance
+
+
+def test_task_consistent_backup_prefers_safe_command_closest_to_nominal():
+    reflex = _reflex(lookahead_steps=20)
+    obstacle = ReflexObstacle((0.08, 0.0, 0.0), (-0.2, 0.0, 0.0), 0.05)
+    nominal = (0.2, 0.0, 0.0)
+
+    task_consistent = reflex.gate((0.0, 0.0, 0.0), nominal, (obstacle,))
+    max_clearance = _reflex(
+        lookahead_steps=20, backup_selection="max_clearance"
+    ).gate((0.0, 0.0, 0.0), nominal, (obstacle,))
+
+    task_deviation = sum(
+        (value - target) ** 2
+        for value, target in zip(task_consistent.velocity, nominal)
+    )
+    clearance_deviation = sum(
+        (value - target) ** 2
+        for value, target in zip(max_clearance.velocity, nominal)
+    )
+    assert task_consistent.reason == "task_consistent_escape"
+    assert max_clearance.reason == "max_clearance_escape"
+    assert task_consistent.filtered_minimum_clearance >= 0.0
+    assert task_consistent.maximum_cbf_violation <= 1e-9
+    assert task_deviation <= clearance_deviation
 
 
 def test_best_effort_escape_never_replaces_motion_with_worse_stationary_backup():
