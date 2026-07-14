@@ -5,12 +5,46 @@ import importlib.util
 import pytest
 
 from lampc_cbf.safe_panda import (
+    CartesianVelocityEstimator,
     SafePandaAdapter,
     SafePandaConfig,
     SafePandaDependencyError,
     make_safe_panda,
     simulator_calibration_sample,
 )
+
+
+def test_cartesian_velocity_estimator_filters_finite_differences() -> None:
+    estimator = CartesianVelocityEstimator(filter_weight=0.5, maximum_speed=1.0)
+    estimator.reset((0.0, 0.0, 0.0))
+
+    first = estimator.update((0.04, 0.0, 0.0), 0.04)
+    second = estimator.update((0.08, 0.0, 0.0), 0.04)
+
+    assert first == pytest.approx((0.5, 0.0, 0.0))
+    assert second == pytest.approx((0.75, 0.0, 0.0))
+
+
+def test_cartesian_velocity_estimator_bounds_position_outliers() -> None:
+    estimator = CartesianVelocityEstimator(filter_weight=1.0, maximum_speed=0.4)
+    estimator.reset((0.0, 0.0, 0.0))
+
+    velocity = estimator.update((10.0, 0.0, 0.0), 0.04)
+
+    assert velocity == pytest.approx((0.4, 0.0, 0.0))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"filter_weight": -0.1},
+        {"filter_weight": 1.1},
+        {"maximum_speed": 0.0},
+    ],
+)
+def test_cartesian_velocity_estimator_rejects_invalid_configuration(kwargs) -> None:
+    with pytest.raises(ValueError):
+        CartesianVelocityEstimator(**kwargs)
 
 
 def test_simulator_calibration_separates_model_and_action_error() -> None:

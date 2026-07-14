@@ -31,6 +31,65 @@ class SimulatorCalibrationSample:
     action_tracking_error: float
 
 
+@dataclass(slots=True)
+class CartesianVelocityEstimator:
+    """Filtered finite-difference velocity from simulator positions."""
+
+    filter_weight: float = 0.5
+    maximum_speed: float = 0.4
+    _previous_position: tuple[float, float, float] | None = field(
+        default=None, init=False, repr=False
+    )
+    _velocity: tuple[float, float, float] = field(
+        default=(0.0, 0.0, 0.0), init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.filter_weight) or not 0.0 <= self.filter_weight <= 1.0:
+            raise ValueError("filter_weight must be finite and in [0, 1]")
+        if not isfinite(self.maximum_speed) or self.maximum_speed <= 0.0:
+            raise ValueError("maximum_speed must be finite and positive")
+
+    @property
+    def velocity(self) -> tuple[float, float, float]:
+        return self._velocity
+
+    def reset(self, position: Sequence[float]) -> None:
+        values = tuple(float(value) for value in position)
+        if len(values) != 3 or not all(isfinite(value) for value in values):
+            raise ValueError("position must be a finite 3-vector")
+        self._previous_position = values
+        self._velocity = (0.0, 0.0, 0.0)
+
+    def update(
+        self, position: Sequence[float], dt: float
+    ) -> tuple[float, float, float]:
+        values = tuple(float(value) for value in position)
+        if len(values) != 3 or not all(isfinite(value) for value in values):
+            raise ValueError("position must be a finite 3-vector")
+        if not isfinite(dt) or dt <= 0.0:
+            raise ValueError("dt must be finite and positive")
+        if self._previous_position is None:
+            self.reset(values)
+            return self._velocity
+
+        raw = tuple(
+            (current - previous) / dt
+            for current, previous in zip(values, self._previous_position)
+        )
+        raw_norm = sqrt(sum(value * value for value in raw))
+        if raw_norm > self.maximum_speed:
+            scale = self.maximum_speed / raw_norm
+            raw = tuple(value * scale for value in raw)
+        alpha = self.filter_weight
+        self._velocity = tuple(
+            alpha * measured + (1.0 - alpha) * prior
+            for measured, prior in zip(raw, self._velocity)
+        )
+        self._previous_position = values
+        return self._velocity
+
+
 def simulator_calibration_sample(
     previous_position: Sequence[float],
     next_position: Sequence[float],

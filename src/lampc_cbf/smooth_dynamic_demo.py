@@ -37,6 +37,8 @@ class SmoothDynamicConfig:
     max_relative_speed: float = 0.4
     total_latency: float = 0.04
     velocity_filter: float = 0.5
+    robot_velocity_filter: float = 0.5
+    robot_velocity_maximum: float = 0.4
     safety_reflex_enabled: bool = True
     reflex_lookahead_steps: int = 8
     reflex_alpha: float = 4.0
@@ -93,6 +95,10 @@ class SmoothDynamicConfig:
             raise ValueError("prediction_mode must be static, velocity, or velocity_tube")
         if not 0.0 <= self.velocity_filter <= 1.0:
             raise ValueError("velocity_filter must be in [0, 1]")
+        if not 0.0 <= self.robot_velocity_filter <= 1.0:
+            raise ValueError("robot_velocity_filter must be in [0, 1]")
+        if self.robot_velocity_maximum <= 0.0:
+            raise ValueError("robot_velocity_maximum must be positive")
         if self.reflex_lookahead_steps < 1 or self.reflex_alpha <= 0.0:
             raise ValueError("reflex lookahead and alpha must be positive")
         if self.avoidance_onset_threshold <= 0.0:
@@ -517,7 +523,7 @@ def run_smooth_dynamic_demo(
         diagnostics_from_do_mpc,
         safe_control_or_none,
     )
-    from .safe_panda import simulator_calibration_sample
+    from .safe_panda import CartesianVelocityEstimator, simulator_calibration_sample
     from .smoothness import (
         calculate_smoothness_metrics,
         make_reference_bspline,
@@ -649,6 +655,12 @@ def run_smooth_dynamic_demo(
         )
         previous_control = np.zeros(4)
         previous_increment = np.zeros(4)
+        robot_velocity_estimator = CartesianVelocityEstimator(
+            filter_weight=cfg.robot_velocity_filter,
+            maximum_speed=cfg.robot_velocity_maximum,
+        )
+        robot_velocity_estimator.reset(start)
+        observed_velocity = np.zeros(3)
         initial_state = np.concatenate([start, [0.0], previous_control])
         if mpc_config.uses_jerk_state:
             initial_state = np.concatenate([initial_state, previous_increment])
@@ -785,7 +797,7 @@ def run_smooth_dynamic_demo(
             )
             predicted_ttc = constant_velocity_ttc(
                 position - estimated_position,
-                previous_control[:3] - estimated_velocity,
+                observed_velocity - estimated_velocity,
                 combined_radius,
             )
             if predicted_ttc is not None:
@@ -857,7 +869,9 @@ def run_smooth_dynamic_demo(
                         **asdict(profile),
                     }
                 )
-            measured_state = np.concatenate([position, [0.0], previous_control])
+            measured_state = np.concatenate(
+                [position, [0.0], observed_velocity, [previous_control[3]]]
+            )
             if mpc_config.uses_jerk_state:
                 measured_state = np.concatenate([measured_state, previous_increment])
             started = perf_counter()
@@ -973,7 +987,7 @@ def run_smooth_dynamic_demo(
                         }
                     )
             pre_step_position = position.copy()
-            model_velocity = previous_control[:3].copy()
+            model_velocity = observed_velocity.copy()
             action = paper_control_to_safe_panda_action(
                 candidate, env.action_space.shape[0],
                 linear_input_limit=mpc_config.linear_input_limit,
@@ -987,6 +1001,10 @@ def run_smooth_dynamic_demo(
             env.sim.set_base_pose("unsafe_region_1", true_obstacle, quaternion)
             task.unsafe_state_1_pos = true_obstacle.copy()
             position = np.asarray(observation["achieved_goal"], dtype=float)
+            observed_velocity = np.asarray(
+                robot_velocity_estimator.update(position, mpc_config.dt),
+                dtype=float,
+            )
             calibration = simulator_calibration_sample(
                 pre_step_position,
                 position,

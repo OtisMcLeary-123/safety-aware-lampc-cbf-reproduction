@@ -22,6 +22,14 @@ def test_dynamic_configuration_accepts_velocity_only_and_direct_target():
     assert config.reference_mode == "direct_target"
 
 
+def test_dynamic_configuration_validates_robot_velocity_estimator() -> None:
+    assert SmoothDynamicConfig(robot_velocity_filter=1.0).robot_velocity_filter == 1.0
+    with pytest.raises(ValueError, match="robot_velocity_filter"):
+        SmoothDynamicConfig(robot_velocity_filter=1.1)
+    with pytest.raises(ValueError, match="robot_velocity_maximum"):
+        SmoothDynamicConfig(robot_velocity_maximum=0.0)
+
+
 def test_simulation_defaults_to_command_velocity_cbf_transition() -> None:
     assert SmoothDynamicConfig().cbf_transition_mode == "command_velocity"
     with pytest.raises(ValueError, match="cbf_transition_mode"):
