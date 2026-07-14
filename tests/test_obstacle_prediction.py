@@ -61,6 +61,26 @@ def test_sampled_data_tube_accounts_for_acceleration_and_can_replay_legacy_bound
     assert legacy.inflation(0.5) == pytest.approx(0.025)
 
 
+def test_formal_tube_uses_explicit_measurement_and_transition_bounds():
+    tube = UncertaintyTubeConfig(
+        measurement_sigma=99.0,
+        measurement_error_bound=0.005,
+        confidence_multiplier=3.0,
+        velocity_error_bound=0.0,
+        model_error_growth=0.0,
+        max_relative_speed=0.0,
+        total_latency=0.0,
+        control_period=0.04,
+        sensor_period=0.04,
+        robot_transition_error_bound=0.002,
+        sampled_data_margin_enabled=False,
+    )
+
+    assert tube.measurement_bound == pytest.approx(0.005)
+    assert tube.inflation(0.0) == pytest.approx(0.007)
+    assert tube.inflation(0.08) == pytest.approx(0.009)
+
+
 def test_observer_estimates_velocity_and_predicts_from_timestamp():
     observer = ConstantVelocityObserver((0.0, 0.0, 0.0), velocity_filter=1.0)
     assert observer.observe((0.1, -0.2, 0.0), 0.5)

@@ -29,7 +29,7 @@ class PairedBenchmarkConfig:
     lateral_upper: float = 0.080
     intervention_time_lower: float = 0.0
     intervention_time_upper: float = 0.40
-    output_dir: str = "artifacts/paired_benchmark_protocol_v4_500"
+    output_dir: str = "artifacts/paired_benchmark_protocol_v5_500"
     resume: bool = True
     feedback_schedule_mode: str = "ttc"
     feedback_ttc_threshold: float = 1.5
@@ -76,6 +76,9 @@ class BenchmarkMethod:
     reference_mode: str = "direct_target"
     provisional_local_feedback: bool = False
     feedback_trigger_mode: str = "configured"
+    formal_safety_filter_enabled: bool = False
+    bounded_measurement_noise: bool = False
+    known_obstacle_velocity: bool = False
 
 
 METHODS: tuple[BenchmarkMethod, ...] = (
@@ -128,6 +131,21 @@ METHODS: tuple[BenchmarkMethod, ...] = (
         online_feedback=True, comparator="robust_stack_fixed_g015",
         experiment_profile="robust_extension", delta_u_weight=2.0,
         reference_mode="straight", provisional_local_feedback=True,
+    ),
+    BenchmarkMethod(
+        "formal_stack_fixed_g015", "cbf", 0.15, "velocity_tube", False, 10.0,
+        comparator="formal_stack_fixed_g015",
+        experiment_profile="formal_extension", delta_u_weight=2.0,
+        reference_mode="straight", formal_safety_filter_enabled=True,
+        bounded_measurement_noise=True, known_obstacle_velocity=True,
+    ),
+    BenchmarkMethod(
+        "formal_stack_async_feedback", "cbf", 0.15, "velocity_tube", False, 10.0,
+        online_feedback=True, comparator="formal_stack_fixed_g015",
+        experiment_profile="formal_extension", delta_u_weight=2.0,
+        reference_mode="straight", provisional_local_feedback=True,
+        feedback_trigger_mode="elapsed_time", formal_safety_filter_enabled=True,
+        bounded_measurement_noise=True, known_obstacle_velocity=True,
     ),
 )
 
@@ -218,7 +236,7 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     feedback_latency = float(payload["feedback_latency"])
     feedback_schedule_mode = str(payload.get("feedback_schedule_mode", "ttc"))
     feedback_ttc_threshold = float(payload.get("feedback_ttc_threshold", 1.5))
-    protocol_version = int(payload.get("protocol_version", 4))
+    protocol_version = int(payload.get("protocol_version", 5))
     benchmark_stage = str(payload.get("benchmark_stage", "confirmatory"))
     rows: list[dict[str, Any]] = []
     for method in METHODS:
@@ -241,8 +259,23 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             safety_mode=method.safety_mode,
             prediction_mode=method.prediction_mode,
             safety_reflex_enabled=method.safety_reflex_enabled,
+            measurement_noise_mode=(
+                "bounded_ball" if method.bounded_measurement_noise else "gaussian"
+            ),
+            measurement_error_bound=0.005,
+            sensor_period=(0.04 if method.bounded_measurement_noise else 0.67),
+            known_obstacle_velocity=method.known_obstacle_velocity,
+            formal_safety_filter_enabled=method.formal_safety_filter_enabled,
+            formal_robot_transition_error_bound=0.008,
+            formal_filter_speed_limit=0.4,
+            formal_obstacle_speed_bound=float(payload.get("speed_upper", 0.20)),
             optimal_decay_weight=method.optimal_decay_weight,
             gamma_schedule=schedule,
+            gamma_schedule_request_times=(
+                (condition["intervention_time"],)
+                if method.online_feedback and method_feedback_mode == "elapsed_time"
+                else ()
+            ),
             provisional_feedback_times=(
                 (condition["intervention_time"],)
                 if method.provisional_local_feedback
@@ -270,8 +303,8 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         )
         result = run_smooth_dynamic_demo(config)
         formal_exact_or_bounded_observation = bool(
-            config.measurement_noise_sigma == 0.0
-            and config.sensor_period <= 0.04 + 1e-12
+            config.measurement_noise_mode == "bounded_ball"
+            and config.measurement_error_bound >= 0.0
         )
         formal_applied_input_matches_mpc = bool(
             result.reflex_interventions == 0
@@ -279,22 +312,62 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             and result.emergency_fallbacks == 0
         )
         formal_model_match_verified = bool(
-            result.max_model_transition_error <= 1e-6
-            and result.max_action_tracking_error <= 1e-6
+            result.max_action_tracking_error
+            <= (
+                config.formal_robot_transition_error_bound
+                if config.formal_safety_filter_enabled
+                else 1e-6
+            )
         )
         formal_initial_safe = result.initial_true_barrier >= 0.0
         formal_raw_discrete_cbf_satisfied = bool(
             method.safety_mode == "cbf" and result.true_cbf_violation_steps == 0
         )
+        formal_final_input_certified = bool(
+            config.formal_safety_filter_enabled
+            and result.formal_filter_uncertified_steps == 0
+        )
+        formal_robust_filter_satisfied = bool(
+            config.formal_safety_filter_enabled
+            and result.minimum_robust_filter_residual is not None
+            and result.minimum_robust_filter_residual >= -1e-9
+        )
+        formal_terminal_certified = bool(
+            config.formal_safety_filter_enabled
+            and result.formal_terminal_backup_uncertified_steps == 0
+            and result.minimum_backup_authority_margin is not None
+            and result.minimum_backup_authority_margin >= -1e-9
+        )
         formal_stepwise_certificate_eligible = all(
             (
                 method.safety_mode == "cbf",
                 formal_initial_safe,
-                formal_raw_discrete_cbf_satisfied,
                 formal_exact_or_bounded_observation,
-                formal_applied_input_matches_mpc,
+                formal_final_input_certified,
+                formal_robust_filter_satisfied,
                 formal_model_match_verified,
             )
+        )
+        formal_recursive_certificate_eligible = bool(
+            formal_stepwise_certificate_eligible and formal_terminal_certified
+        )
+        elapsed_episode_time = result.steps * 0.04
+        feedback_local_causal_opportunity = bool(
+            method.provisional_local_feedback
+            and condition["intervention_time"] < elapsed_episode_time
+        )
+        feedback_llm_causal_opportunity = bool(
+            method.online_feedback and result.gamma_updates_applied > 0
+        )
+        feedback_available_time = (
+            condition["intervention_time"] + feedback_latency
+            if method.online_feedback and method_feedback_mode == "elapsed_time"
+            else result.feedback_available_time
+        )
+        feedback_response_arrived_before_termination = bool(
+            method.online_feedback
+            and feedback_available_time is not None
+            and feedback_available_time < elapsed_episode_time
         )
         rows.append(
             {
@@ -344,10 +417,44 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "minimum_predicted_ttc": result.minimum_predicted_ttc,
                 "feedback_latency": feedback_latency if method.online_feedback else 0.0,
                 "feedback_schedule_mode": method_feedback_mode,
-                "feedback_trigger_time": result.feedback_trigger_time,
-                "feedback_available_time": result.feedback_available_time,
-                "feedback_causal_opportunity": result.feedback_causal_opportunity,
+                "feedback_trigger_time": (
+                    condition["intervention_time"]
+                    if method.online_feedback and method_feedback_mode == "elapsed_time"
+                    else result.feedback_trigger_time
+                ),
+                "feedback_available_time": feedback_available_time,
+                "feedback_causal_opportunity": (
+                    feedback_llm_causal_opportunity
+                    if method_feedback_mode == "elapsed_time"
+                    else result.feedback_causal_opportunity
+                ),
+                "feedback_local_causal_opportunity": (
+                    feedback_local_causal_opportunity
+                ),
+                "feedback_llm_causal_opportunity": (
+                    feedback_llm_causal_opportunity
+                ),
+                "feedback_response_arrived_before_termination": (
+                    feedback_response_arrived_before_termination
+                ),
+                "feedback_unavailable_by_termination": bool(
+                    method.online_feedback
+                    and not feedback_response_arrived_before_termination
+                ),
                 "feedback_updates_rejected_late": result.feedback_updates_rejected_late,
+                "formal_filter_interventions": result.formal_filter_interventions,
+                "formal_filter_uncertified_steps": (
+                    result.formal_filter_uncertified_steps
+                ),
+                "formal_terminal_backup_uncertified_steps": (
+                    result.formal_terminal_backup_uncertified_steps
+                ),
+                "minimum_robust_filter_residual": (
+                    result.minimum_robust_filter_residual
+                ),
+                "minimum_backup_authority_margin": (
+                    result.minimum_backup_authority_margin
+                ),
                 "solver_failures": result.solver_failures,
                 "solver_rejections": result.solver_rejections,
                 "solver_max_cpu_time_exits": result.solver_max_cpu_time_exits,
@@ -370,12 +477,18 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                     formal_exact_or_bounded_observation
                 ),
                 "formal_applied_input_matches_mpc": formal_applied_input_matches_mpc,
+                "formal_final_input_certified": formal_final_input_certified,
+                "formal_robust_filter_satisfied": formal_robust_filter_satisfied,
                 "formal_model_match_verified": formal_model_match_verified,
-                "formal_terminal_safe_set_or_backup_certified": False,
+                "formal_terminal_safe_set_or_backup_certified": (
+                    formal_terminal_certified
+                ),
                 "formal_stepwise_certificate_eligible": (
                     formal_stepwise_certificate_eligible
                 ),
-                "formal_recursive_certificate_eligible": False,
+                "formal_recursive_certificate_eligible": (
+                    formal_recursive_certificate_eligible
+                ),
                 **result.smoothness.as_dict(),
             }
         )
@@ -390,10 +503,14 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
     typed: list[dict[str, Any]] = []
     boolean_fields = {
         "joint_success", "success", "reached_goal", "collision",
-        "feedback_causal_opportunity", "formal_initial_safe",
+        "feedback_causal_opportunity", "feedback_local_causal_opportunity",
+        "feedback_llm_causal_opportunity",
+        "feedback_response_arrived_before_termination",
+        "feedback_unavailable_by_termination", "formal_initial_safe",
         "formal_raw_discrete_cbf_satisfied",
         "formal_exact_or_bounded_observation",
         "formal_applied_input_matches_mpc", "formal_model_match_verified",
+        "formal_final_input_certified", "formal_robust_filter_satisfied",
         "formal_terminal_safe_set_or_backup_certified",
         "formal_stepwise_certificate_eligible",
         "formal_recursive_certificate_eligible",
@@ -409,6 +526,8 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
         "most_infeasible_stage", "infeasible_stage_events",
         "safety_profile_transitions",
         "true_cbf_violation_steps",
+        "formal_filter_interventions", "formal_filter_uncertified_steps",
+        "formal_terminal_backup_uncertified_steps",
     }
     text_fields = {
         "benchmark_stage", "method", "comparator", "experiment_profile", "outcome",
@@ -554,6 +673,40 @@ def summarize_paired_rows(
                 int(row.get("true_cbf_violation_steps", 0))
                 for row in method_rows
             ),
+            "formal_filter_interventions": sum(
+                int(row.get("formal_filter_interventions", 0))
+                for row in method_rows
+            ),
+            "formal_filter_uncertified_steps": sum(
+                int(row.get("formal_filter_uncertified_steps", 0))
+                for row in method_rows
+            ),
+            "formal_terminal_backup_uncertified_steps": sum(
+                int(row.get("formal_terminal_backup_uncertified_steps", 0))
+                for row in method_rows
+            ),
+            "minimum_robust_filter_residual": (
+                float(np.min([
+                    row["minimum_robust_filter_residual"] for row in method_rows
+                    if row.get("minimum_robust_filter_residual") is not None
+                ]))
+                if any(
+                    row.get("minimum_robust_filter_residual") is not None
+                    for row in method_rows
+                )
+                else None
+            ),
+            "minimum_backup_authority_margin": (
+                float(np.min([
+                    row["minimum_backup_authority_margin"] for row in method_rows
+                    if row.get("minimum_backup_authority_margin") is not None
+                ]))
+                if any(
+                    row.get("minimum_backup_authority_margin") is not None
+                    for row in method_rows
+                )
+                else None
+            ),
             "paired_clearance_difference_95_ci": list(clearance_difference_ci),
             "median_avoidance_onset_time": float(np.median([
                 row["avoidance_onset_time"] for row in method_rows
@@ -597,6 +750,22 @@ def summarize_paired_rows(
                 bool(row.get("feedback_causal_opportunity", False))
                 for row in method_rows
             ),
+            "feedback_local_causal_opportunities": sum(
+                bool(row.get("feedback_local_causal_opportunity", False))
+                for row in method_rows
+            ),
+            "feedback_llm_causal_opportunities": sum(
+                bool(row.get("feedback_llm_causal_opportunity", False))
+                for row in method_rows
+            ),
+            "feedback_responses_arrived_before_termination": sum(
+                bool(row.get("feedback_response_arrived_before_termination", False))
+                for row in method_rows
+            ),
+            "feedback_unavailable_by_termination": sum(
+                bool(row.get("feedback_unavailable_by_termination", False))
+                for row in method_rows
+            ),
             "feedback_updates_with_causal_opportunity": sum(
                 bool(row.get("feedback_causal_opportunity", False))
                 and int(row.get("gamma_updates_applied", 0)) > 0
@@ -634,6 +803,14 @@ def summarize_paired_rows(
                 ),
                 "applied_input_matches_mpc_episodes": sum(
                     bool(row.get("formal_applied_input_matches_mpc", False))
+                    for row in method_rows
+                ),
+                "final_input_certified_episodes": sum(
+                    bool(row.get("formal_final_input_certified", False))
+                    for row in method_rows
+                ),
+                "robust_filter_satisfied_episodes": sum(
+                    bool(row.get("formal_robust_filter_satisfied", False))
                     for row in method_rows
                 ),
                 "model_match_verified_episodes": sum(
@@ -717,6 +894,49 @@ def evaluate_secondary_robust_contrast(
     }
 
 
+def evaluate_formal_contract_gate(
+    summaries: Mapping[str, Mapping[str, Any]],
+    config: PairedBenchmarkConfig,
+) -> dict[str, Any]:
+    """Check the bounded-error, final-input, and terminal-backup contract.
+
+    Passing this gate validates every sampled episode against declared bounds;
+    it is not a whole-body Panda proof and cannot validate an incorrect bound.
+    """
+
+    method_names = ("formal_stack_fixed_g015", "formal_stack_async_feedback")
+    checks: dict[str, bool] = {}
+    for name in method_names:
+        summary = summaries[name]
+        audit = summary["formal_scope_audit"]
+        episodes = int(summary["episodes"])
+        checks[f"{name}:zero_collision"] = int(summary["collisions"]) == 0
+        checks[f"{name}:all_recursive_eligible"] = (
+            int(audit["recursive_certificate_eligible_episodes"]) == episodes
+        )
+        checks[f"{name}:zero_filter_uncertified_steps"] = (
+            int(summary["formal_filter_uncertified_steps"]) == 0
+        )
+        checks[f"{name}:zero_terminal_uncertified_steps"] = (
+            int(summary["formal_terminal_backup_uncertified_steps"]) == 0
+        )
+        checks[f"{name}:positive_backup_authority_margin"] = (
+            summary.get("minimum_backup_authority_margin") is not None
+            and float(summary["minimum_backup_authority_margin"]) > 0.0
+        )
+    evaluated = config.stage in {"development", "confirmatory"}
+    return {
+        "evaluated": evaluated,
+        "passed": all(checks.values()) if evaluated else None,
+        "scope": (
+            "spherical end-effector versus one spherical obstacle under the "
+            "declared bounded measurement, obstacle-motion, and transition errors"
+        ),
+        "whole_body_panda_certified": False,
+        "checks": checks,
+    }
+
+
 def _plot_summary(rows: Sequence[Mapping[str, Any]], summaries: Mapping[str, Any], path: Path) -> None:
     import matplotlib.pyplot as plt
     import numpy as np
@@ -748,22 +968,28 @@ def _plot_summary(rows: Sequence[Mapping[str, Any]], summaries: Mapping[str, Any
 
 
 def run_paired_benchmark(
-    feedback_decision: GammaDecision,
+    feedback_decisions: Sequence[GammaDecision],
     config: PairedBenchmarkConfig | None = None,
 ) -> dict[str, Any]:
     """Run or resume all methods on identical Safe Panda Gym conditions."""
 
     cfg = config or PairedBenchmarkConfig()
-    if feedback_decision.fallback_used:
-        raise ValueError("benchmark requires a validated non-fallback feedback decision")
-    if not isfinite(feedback_decision.latency_seconds) or feedback_decision.latency_seconds < 0.0:
-        raise ValueError("feedback latency must be finite and non-negative")
+    decisions = tuple(feedback_decisions)
+    if len(decisions) != cfg.episodes:
+        raise ValueError("benchmark requires one feedback decision per episode")
+    if any(decision.fallback_used for decision in decisions):
+        raise ValueError("benchmark requires validated non-fallback feedback decisions")
+    if any(
+        not isfinite(decision.latency_seconds) or decision.latency_seconds < 0.0
+        for decision in decisions
+    ):
+        raise ValueError("feedback latencies must be finite and non-negative")
     root = Path(cfg.output_dir)
     root.mkdir(parents=True, exist_ok=True)
     csv_path = root / "episodes.csv"
     rows = _read_checkpoint(csv_path) if cfg.resume else []
     if rows and any(
-        int(row.get("protocol_version", -1)) != 4
+        int(row.get("protocol_version", -1)) != 5
         or row.get("benchmark_stage") != cfg.stage
         or int(row.get("max_steps_budget", -1)) != cfg.max_steps
         for row in rows
@@ -778,6 +1004,26 @@ def run_paired_benchmark(
         if sum(int(row["episode"]) == int(episode) for row in rows) == len(METHODS)
     }
     conditions = [item for item in _conditions(cfg) if item["episode"] not in complete]
+    if rows:
+        expected_latency = {
+            episode: decisions[episode].latency_seconds
+            for episode in range(cfg.episodes)
+        }
+        if any(
+            bool(row.get("method") in {
+                "paper_async_feedback_static", "robust_stack_async_feedback",
+                "formal_stack_async_feedback",
+            })
+            and abs(
+                float(row.get("feedback_latency", -1.0))
+                - expected_latency[int(row["episode"])]
+            ) > 1e-12
+            for row in rows
+        ):
+            raise ValueError(
+                "checkpoint feedback latency trace differs from this run; "
+                "use a new output directory"
+            )
     print(
         f"[paired] {len(complete)}/{cfg.episodes} conditions restored; "
         f"{len(conditions)} pending across {cfg.workers} workers",
@@ -787,12 +1033,13 @@ def run_paired_benchmark(
         {
             "condition": condition,
             "max_steps": cfg.max_steps,
-            "feedback_gamma": feedback_decision.gamma,
-            "feedback_latency": feedback_decision.latency_seconds,
+            "feedback_gamma": decisions[int(condition["episode"])].gamma,
+            "feedback_latency": decisions[int(condition["episode"])].latency_seconds,
             "feedback_schedule_mode": cfg.feedback_schedule_mode,
             "feedback_ttc_threshold": cfg.feedback_ttc_threshold,
-            "protocol_version": 4,
+            "protocol_version": 5,
             "benchmark_stage": cfg.stage,
+            "speed_upper": cfg.speed_upper,
         }
         for condition in conditions
     ]
@@ -816,14 +1063,41 @@ def run_paired_benchmark(
     summaries = summarize_paired_rows(rows, cfg)
     efficacy_gate = evaluate_confirmatory_efficacy_gate(summaries, cfg)
     secondary_robust_contrast = evaluate_secondary_robust_contrast(summaries, cfg)
+    formal_contract_gate = evaluate_formal_contract_gate(summaries, cfg)
     summary = {
-        "study_id": f"safe-panda-paired-protocol-v4-{cfg.episodes}",
-        "protocol_version": 4,
+        "study_id": f"safe-panda-paired-protocol-v5-{cfg.episodes}",
+        "protocol_version": 5,
         "config": asdict(cfg),
         "methods": summaries,
         "efficacy_gate": efficacy_gate,
         "secondary_robust_contrast": secondary_robust_contrast,
-        "feedback_decision": feedback_decision.as_dict(),
+        "formal_contract_gate": formal_contract_gate,
+        "feedback_decisions": [
+            {
+                key: value
+                for key, value in decision.as_dict().items()
+                if key != "raw_response"
+            }
+            for decision in decisions
+        ],
+        "feedback_latency": {
+            "mode": "measured_per_episode",
+            "request_count": len(decisions),
+            "minimum_seconds": min(decision.latency_seconds for decision in decisions),
+            "mean_seconds": sum(
+                decision.latency_seconds for decision in decisions
+            ) / len(decisions),
+            "maximum_seconds": max(decision.latency_seconds for decision in decisions),
+            "unique_request_hashes": len({
+                decision.request_hash for decision in decisions
+            }),
+            "unique_request_timestamps": len({
+                decision.requested_at_unix for decision in decisions
+            }),
+            "all_latency_samples_identical": len({
+                decision.latency_seconds for decision in decisions
+            }) == 1,
+        },
         "paired_randomization": True,
         "common_random_numbers": True,
         "simulator": "PandaReachSafe-v3 / PyBullet Tiny / do-mpc / CasADi / IPOPT",
@@ -838,13 +1112,13 @@ def run_paired_benchmark(
             ),
         },
         "formal_scope": (
-            "The raw true-state discrete-CBF residual is audited, but Monte Carlo is not "
-            "a proof. Stepwise eligibility requires exact or deterministically bounded "
-            "observations, verified model/action matching, accepted MPC input, initial "
-            "safe-set membership, and nonnegative raw residual. Recursive eligibility "
-            "also requires a certified terminal safe set or invariant backup controller; "
-            "the current Panda controller has neither. Gaussian noise and the operational-"
-            "space reflex do not certify whole-body Panda safety."
+            "Monte Carlo is not a proof. Paper-fidelity and robust-extension profiles "
+            "remain formally ineligible under Gaussian observation noise or an "
+            "uncertified post-MPC reflex. The formal-extension profile uses bounded-ball "
+            "measurement error, a declared additive transition-error bound, a final "
+            "discrete robust safety filter, and a radial escape backup set. Its contract "
+            "covers only the spherical end-effector/obstacle model, not Panda links, "
+            "joints, contact dynamics, or correctness of the declared bounds."
         ),
     }
     (root / "benchmark_summary.json").write_text(

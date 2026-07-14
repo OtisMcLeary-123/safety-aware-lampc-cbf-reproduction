@@ -44,8 +44,8 @@ def main() -> int:
         "--feedback-decision-json",
         default=None,
         help=(
-            "Use a previously validated GammaDecision JSON (or benchmark summary "
-            "containing feedback_decision) instead of calling a provider."
+            "Use a JSON list of previously validated per-episode GammaDecision "
+            "objects (or a benchmark summary containing feedback_decisions)."
         ),
     )
     parser.add_argument("--output-dir", default=None)
@@ -54,21 +54,31 @@ def main() -> int:
     stage_episodes = {"smoke": 12, "development": 100, "confirmatory": 500}
     episodes = args.episodes or stage_episodes[args.stage]
     max_steps = args.max_steps or (220 if args.stage == "confirmatory" else 140)
-    output_dir = args.output_dir or f"artifacts/paired_benchmark_protocol_v4_{args.stage}_{episodes}"
+    output_dir = args.output_dir or f"artifacts/paired_benchmark_protocol_v5_{args.stage}_{episodes}"
 
     if args.feedback_decision_json:
         decision_payload = json.loads(
             Path(args.feedback_decision_json).read_text(encoding="utf-8")
         )
-        if "feedback_decision" in decision_payload:
-            decision_payload = decision_payload["feedback_decision"]
-        feedback = GammaDecision(**decision_payload)
+        if isinstance(decision_payload, dict) and "feedback_decisions" in decision_payload:
+            decision_payload = decision_payload["feedback_decisions"]
+        if not isinstance(decision_payload, list):
+            raise ValueError(
+                "feedback decision file must contain one validated decision per episode"
+            )
+        feedback_decisions = [
+            GammaDecision(raw_response=None, **item)
+            if "raw_response" not in item
+            else GammaDecision(**item)
+            for item in decision_payload
+        ]
     elif args.llm_provider == "nvidia-nim":
         defaults = NvidiaNIMGammaConfig()
         mapper = NvidiaNIMGammaMapper(
             NvidiaNIMGammaConfig(
                 model=args.llm_model or defaults.model,
                 timeout_seconds=args.llm_timeout,
+                cache_path=None,
             )
         )
     else:
@@ -77,20 +87,32 @@ def main() -> int:
             HFLLMConfig(
                 model=args.llm_model or defaults.model,
                 timeout_seconds=args.llm_timeout,
+                cache_path=None,
             )
         )
     if not args.feedback_decision_json:
-        feedback = mapper.infer_gamma(
-            "Watch out! I think the robot is going to crash soon. Increase clearance now.",
-            current_gamma=0.15,
-            feedback=True,
-        )
-    if feedback.fallback_used:
-        raise RuntimeError(
-            f"validated LLM feedback is required; inference failed with {feedback.error_type}"
-        )
+        feedback_decisions = []
+        for episode in range(episodes):
+            feedback = mapper.infer_gamma(
+                "Watch out! I think the robot is going to crash soon. Increase clearance now.",
+                current_gamma=0.15,
+                feedback=True,
+            )
+            if feedback.fallback_used:
+                raise RuntimeError(
+                    "validated per-episode LLM feedback is required; "
+                    f"episode {episode} failed with {feedback.error_type}"
+                )
+            feedback_decisions.append(feedback)
+            print(
+                f"[feedback] collected {episode + 1}/{episodes}; "
+                f"latency={feedback.latency_seconds:.3f}s",
+                flush=True,
+            )
+    if len(feedback_decisions) != episodes:
+        raise ValueError("feedback decision count must match episode count")
     summary = run_paired_benchmark(
-        feedback,
+        feedback_decisions,
         PairedBenchmarkConfig(
             stage=args.stage,
             episodes=episodes,
@@ -104,6 +126,7 @@ def main() -> int:
     )
     print(json.dumps(summary["methods"], indent=2))
     print(json.dumps({"efficacy_gate": summary["efficacy_gate"]}, indent=2))
+    print(json.dumps({"formal_contract_gate": summary["formal_contract_gate"]}, indent=2))
     if args.stage == "confirmatory" and summary["efficacy_gate"]["passed"] is not True:
         return 2
     return 0

@@ -77,6 +77,29 @@ def test_simulation_defaults_to_command_velocity_cbf_transition() -> None:
         SmoothDynamicConfig(cbf_transition_mode="unknown")
 
 
+def test_formal_profile_requires_bounded_measurement_noise() -> None:
+    with pytest.raises(ValueError, match="deterministically bounded"):
+        SmoothDynamicConfig(formal_safety_filter_enabled=True)
+    config = SmoothDynamicConfig(
+        formal_safety_filter_enabled=True,
+        measurement_noise_mode="bounded_ball",
+    )
+    assert config.measurement_error_bound == pytest.approx(0.005)
+
+
+def test_delayed_schedule_tracks_request_time_for_ttl() -> None:
+    config = SmoothDynamicConfig(
+        gamma_schedule=((1.2, 0.02),),
+        gamma_schedule_request_times=(0.2,),
+    )
+    assert config.gamma_schedule_request_times == (0.2,)
+    with pytest.raises(ValueError, match="match schedule"):
+        SmoothDynamicConfig(
+            gamma_schedule=((1.2, 0.02),),
+            gamma_schedule_request_times=(0.1, 0.2),
+        )
+
+
 def test_reference_progress_is_monotone() -> None:
     path = np.column_stack(
         [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]

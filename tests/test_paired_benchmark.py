@@ -4,6 +4,7 @@ from lampc_cbf.paired_benchmark import (
     METHODS,
     PairedBenchmarkConfig,
     evaluate_confirmatory_efficacy_gate,
+    evaluate_formal_contract_gate,
     exact_mcnemar_pvalue,
     summarize_paired_rows,
 )
@@ -34,6 +35,11 @@ def test_protocol_separates_paper_fidelity_from_robust_extension():
     assert robust.experiment_profile == "robust_extension"
     assert robust.delta_u_weight == pytest.approx(2.0)
     assert robust.reference_mode == "straight"
+    formal = next(method for method in METHODS if method.name == "formal_stack_fixed_g015")
+    assert formal.experiment_profile == "formal_extension"
+    assert formal.formal_safety_filter_enabled
+    assert formal.bounded_measurement_noise
+    assert formal.known_obstacle_velocity
 
 
 def test_exact_mcnemar_handles_ties_and_one_sided_discordance():
@@ -55,6 +61,11 @@ def _row(method, episode, success):
         "minimum_true_barrier": 0.001 if success else -0.001,
         "minimum_true_cbf_residual": 0.0001 if method.safety_mode == "cbf" else None,
         "true_cbf_violation_steps": 0,
+        "formal_filter_interventions": 0,
+        "formal_filter_uncertified_steps": 0,
+        "formal_terminal_backup_uncertified_steps": 0,
+        "minimum_robust_filter_residual": None,
+        "minimum_backup_authority_margin": None,
         "avoidance_onset_time": 0.2,
         "minimum_predicted_ttc": 0.4,
         "path_length": 0.3,
@@ -71,6 +82,8 @@ def _row(method, episode, success):
         "formal_raw_discrete_cbf_satisfied": method.safety_mode == "cbf",
         "formal_exact_or_bounded_observation": False,
         "formal_applied_input_matches_mpc": not method.safety_reflex_enabled,
+        "formal_final_input_certified": False,
+        "formal_robust_filter_satisfied": False,
         "formal_model_match_verified": False,
         "formal_terminal_safe_set_or_backup_certified": False,
         "formal_stepwise_certificate_eligible": False,
@@ -159,6 +172,35 @@ def test_development_reports_but_does_not_apply_efficacy_gate(tmp_path):
     )
     assert gate["evaluated"] is False
     assert gate["passed"] is None
+
+
+def test_formal_contract_gate_requires_every_episode_to_be_recursive(tmp_path):
+    rows = []
+    for method in METHODS:
+        row = _row(method, 0, True)
+        if method.experiment_profile == "formal_extension":
+            row.update(
+                formal_final_input_certified=True,
+                formal_robust_filter_satisfied=True,
+                formal_model_match_verified=True,
+                formal_exact_or_bounded_observation=True,
+                formal_terminal_safe_set_or_backup_certified=True,
+                formal_stepwise_certificate_eligible=True,
+                formal_recursive_certificate_eligible=True,
+                minimum_robust_filter_residual=0.0,
+                minimum_backup_authority_margin=0.01,
+            )
+        rows.append(row)
+    config = PairedBenchmarkConfig(
+        stage="development", episodes=1, bootstrap_resamples=20,
+        workers=1, output_dir=str(tmp_path),
+    )
+    gate = evaluate_formal_contract_gate(
+        summarize_paired_rows(rows, config), config
+    )
+    assert gate["evaluated"] is True
+    assert gate["passed"] is True
+    assert gate["whole_body_panda_certified"] is False
 
 
 def test_summary_rejects_unpaired_episode_ids(tmp_path):

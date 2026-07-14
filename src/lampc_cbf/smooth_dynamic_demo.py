@@ -24,6 +24,8 @@ class SmoothDynamicConfig:
     save_animation: bool = False
     sensor_period: float = 0.67
     measurement_noise_sigma: float = 0.005
+    measurement_noise_mode: str = "gaussian"
+    measurement_error_bound: float = 0.005
     reference_speed: float = 0.12
     goal_offset: tuple[float, float, float] = (0.0, 0.30, 0.0)
     obstacle_start_offset: tuple[float, float, float] = (-0.12, 0.15, 0.0)
@@ -43,6 +45,13 @@ class SmoothDynamicConfig:
     robot_velocity_filter: float = 0.5
     robot_velocity_maximum: float = 0.4
     robot_velocity_feedback_enabled: bool = True
+    known_obstacle_velocity: bool = False
+    formal_safety_filter_enabled: bool = False
+    formal_robot_transition_error_bound: float = 0.008
+    formal_filter_speed_limit: float = 0.4
+    formal_obstacle_speed_bound: float = 0.20
+    formal_obstacle_velocity_error_bound: float = 0.0
+    abort_on_formal_certificate_failure: bool = True
     safety_reflex_enabled: bool = True
     reflex_lookahead_steps: int = 8
     reflex_alpha: float = 4.0
@@ -72,6 +81,7 @@ class SmoothDynamicConfig:
     # transition, where p[k+1] depends on the stored velocity x[4:7].
     cbf_transition_mode: str = "command_velocity"
     gamma_schedule: tuple[tuple[float, float], ...] = ()
+    gamma_schedule_request_times: tuple[float, ...] = ()
     gamma_update_ttl: float = 1.0
     context_safety_enabled: bool = False
     requested_safety_level: int = 3
@@ -107,6 +117,10 @@ class SmoothDynamicConfig:
             raise ValueError("period and reference speed must be positive")
         if self.measurement_noise_sigma < 0.0:
             raise ValueError("measurement noise must be non-negative")
+        if self.measurement_noise_mode not in {"gaussian", "bounded_ball"}:
+            raise ValueError("measurement_noise_mode must be gaussian or bounded_ball")
+        if self.measurement_error_bound < 0.0:
+            raise ValueError("measurement_error_bound must be non-negative")
         if self.obstacle_acceleration_bound < 0.0:
             raise ValueError("obstacle_acceleration_bound must be non-negative")
         if self.gamma_update_ttl <= 0.0:
@@ -125,6 +139,17 @@ class SmoothDynamicConfig:
             raise ValueError("robot_velocity_filter must be in [0, 1]")
         if self.robot_velocity_maximum <= 0.0:
             raise ValueError("robot_velocity_maximum must be positive")
+        if any(
+            value < 0.0
+            for value in (
+                self.formal_robot_transition_error_bound,
+                self.formal_obstacle_speed_bound,
+                self.formal_obstacle_velocity_error_bound,
+            )
+        ) or self.formal_filter_speed_limit <= 0.0:
+            raise ValueError("formal safety bounds must be non-negative")
+        if self.formal_safety_filter_enabled and self.measurement_noise_mode != "bounded_ball":
+            raise ValueError("formal safety filter requires deterministically bounded noise")
         if self.reflex_lookahead_steps < 1 or self.reflex_alpha <= 0.0:
             raise ValueError("reflex lookahead and alpha must be positive")
         if self.reflex_backup_selection not in {"max_clearance", "task_consistent"}:
@@ -195,6 +220,13 @@ class SmoothDynamicConfig:
             raise ValueError("provisional feedback times must be non-negative")
         if tuple(sorted(self.provisional_feedback_times)) != self.provisional_feedback_times:
             raise ValueError("provisional feedback times must be sorted")
+        if self.gamma_schedule_request_times and (
+            len(self.gamma_schedule_request_times) != len(self.gamma_schedule)
+            or any(time < 0.0 for time in self.gamma_schedule_request_times)
+        ):
+            raise ValueError(
+                "gamma schedule request times must be non-negative and match schedule"
+            )
         if self.feedback_ttc_threshold is not None and self.feedback_ttc_threshold <= 0.0:
             raise ValueError("feedback_ttc_threshold must be positive when provided")
         if self.feedback_response_latency < 0.0:
@@ -227,6 +259,11 @@ class SmoothDynamicResult:
     minimum_true_barrier: float
     minimum_true_cbf_residual: float | None
     true_cbf_violation_steps: int
+    formal_filter_interventions: int
+    formal_filter_uncertified_steps: int
+    formal_terminal_backup_uncertified_steps: int
+    minimum_robust_filter_residual: float | None
+    minimum_backup_authority_margin: float | None
     final_goal_distance: float
     initial_goal_distance: float
     net_goal_progress: float
@@ -269,6 +306,28 @@ class SmoothDynamicResult:
     infeasible_stage_events: int
     smoothness: SmoothnessMetrics
     output_dir: str
+
+
+def sample_obstacle_measurement_noise(
+    rng: Any,
+    *,
+    mode: str,
+    sigma: float,
+    error_bound: float,
+) -> Any:
+    """Sample Gaussian evidence noise or a deterministically bounded 3-D ball."""
+
+    import numpy as np
+
+    if mode == "gaussian":
+        return rng.normal(0.0, sigma, size=3)
+    if mode != "bounded_ball":
+        raise ValueError("noise mode must be gaussian or bounded_ball")
+    value = np.asarray(rng.uniform(-error_bound, error_bound, size=3), dtype=float)
+    magnitude = float(np.linalg.norm(value))
+    if magnitude > error_bound > 0.0:
+        value *= error_bound / magnitude
+    return value
 
 
 def classify_episode_outcome(
@@ -654,6 +713,11 @@ def run_smooth_dynamic_demo(
     from .controller import PaperMPCConfig, build_mpc_controller
     from .async_gamma import AtomicGammaStore, GammaUpdate, GammaUpdateQueue
     from .demo import paper_control_to_safe_panda_action
+    from .formal_safety import (
+        FormalDiscreteSafetyFilter,
+        FormalObstacle,
+        FormalSafetyConfig,
+    )
     from .obstacle_prediction import UncertaintyTubeConfig
     from .safety_reflex import (
         OperationalSpaceSafetyReflex,
@@ -715,6 +779,7 @@ def run_smooth_dynamic_demo(
     emergency_fallbacks = 0
     constraint_violations: list[float] = []
     sensor_update_steps: list[int] = [0]
+    formal_filter_audits: list[dict[str, Any]] = []
 
     try:
         observation, _ = env.reset(seed=cfg.seed)
@@ -756,8 +821,11 @@ def run_smooth_dynamic_demo(
                 ]
             )
             reference_path = make_reference_bspline(route_points)
-        measurement = true_obstacle + rng.normal(
-            0.0, cfg.measurement_noise_sigma, size=3
+        measurement = true_obstacle + sample_obstacle_measurement_noise(
+            rng,
+            mode=cfg.measurement_noise_mode,
+            sigma=cfg.measurement_noise_sigma,
+            error_bound=cfg.measurement_error_bound,
         )
         mpc_config = PaperMPCConfig(
             linear_delta_u_weight=cfg.delta_u_weight,
@@ -780,6 +848,11 @@ def run_smooth_dynamic_demo(
             tube_config=UncertaintyTubeConfig(
                 measurement_sigma=cfg.measurement_noise_sigma,
                 confidence_multiplier=cfg.confidence_multiplier,
+                measurement_error_bound=(
+                    cfg.measurement_error_bound
+                    if cfg.measurement_noise_mode == "bounded_ball"
+                    else None
+                ),
                 velocity_error_bound=cfg.velocity_error_bound,
                 initial_velocity_error_bound=cfg.initial_velocity_error_bound,
                 model_error_growth=cfg.model_error_growth,
@@ -788,11 +861,38 @@ def run_smooth_dynamic_demo(
                 sensor_period=cfg.sensor_period,
                 control_period=mpc_config.dt,
                 obstacle_acceleration_bound=cfg.obstacle_acceleration_bound,
+                robot_transition_error_bound=(
+                    cfg.formal_robot_transition_error_bound
+                    if cfg.formal_safety_filter_enabled
+                    else 0.0
+                ),
                 sampled_data_margin_enabled=cfg.sampled_data_margin_enabled,
             ),
             velocity_filter=cfg.velocity_filter,
             direct_target=cfg.reference_mode == "direct_target",
             cbf_transition_mode=cfg.cbf_transition_mode,
+        )
+        if cfg.known_obstacle_velocity:
+            tvp.observer.velocity = tuple(float(value) for value in obstacle_velocity)
+        formal_filter = (
+            FormalDiscreteSafetyFilter(
+                FormalSafetyConfig(
+                    dt=mpc_config.dt,
+                    gamma=cfg.gamma,
+                    speed_limit=cfg.formal_filter_speed_limit,
+                    measurement_error_bound=cfg.measurement_error_bound,
+                    obstacle_velocity_error_bound=(
+                        cfg.formal_obstacle_velocity_error_bound
+                    ),
+                    obstacle_acceleration_bound=cfg.obstacle_acceleration_bound,
+                    robot_transition_error_bound=(
+                        cfg.formal_robot_transition_error_bound
+                    ),
+                    obstacle_speed_bound=cfg.formal_obstacle_speed_bound,
+                )
+            )
+            if cfg.formal_safety_filter_enabled
+            else None
         )
         _, mpc = build_mpc_controller(
             mpc_config,
@@ -938,12 +1038,17 @@ def run_smooth_dynamic_demo(
                 and elapsed + 1e-12 >= cfg.gamma_schedule[schedule_index][0]
             ):
                 scheduled_time, scheduled_gamma = cfg.gamma_schedule[schedule_index]
+                request_time = (
+                    cfg.gamma_schedule_request_times[schedule_index]
+                    if cfg.gamma_schedule_request_times
+                    else scheduled_time
+                )
                 gamma_queue.publish(
                     GammaUpdate(
                         gamma=scheduled_gamma,
                         version=schedule_index + 1,
-                        created_at=elapsed,
-                        valid_until=elapsed + cfg.gamma_update_ttl,
+                        created_at=request_time,
+                        valid_until=request_time + cfg.gamma_update_ttl,
                         reason="scheduled_online_feedback",
                         source="benchmark_replay",
                     )
@@ -970,8 +1075,11 @@ def run_smooth_dynamic_demo(
                     }
                 )
             if elapsed + 1e-12 >= next_sensor_time:
-                measurement = true_obstacle + rng.normal(
-                    0.0, cfg.measurement_noise_sigma, size=3
+                measurement = true_obstacle + sample_obstacle_measurement_noise(
+                    rng,
+                    mode=cfg.measurement_noise_mode,
+                    sigma=cfg.measurement_noise_sigma,
+                    error_bound=cfg.measurement_error_bound,
                 )
                 sensor_update_steps.append(step_index)
                 last_measurement_time = elapsed
@@ -984,9 +1092,17 @@ def run_smooth_dynamic_demo(
                 control_time=elapsed,
                 measurement_time=last_measurement_time,
             )
+            if cfg.known_obstacle_velocity:
+                # Preserve the declared exact-velocity contract after the
+                # observer consumes each noisy position sample.
+                tvp.observer.velocity = tuple(
+                    float(value) for value in obstacle_velocity
+                )
             estimated_position = np.asarray(tvp.observer.predict(elapsed), dtype=float)
             estimated_velocity = np.asarray(
-                tvp.observer.velocity
+                obstacle_velocity
+                if cfg.known_obstacle_velocity
+                else tvp.observer.velocity
                 if cfg.prediction_mode in {"velocity", "velocity_tube"}
                 else (0.0, 0.0, 0.0),
                 dtype=float,
@@ -1230,6 +1346,47 @@ def run_smooth_dynamic_demo(
                             "robust_recovery": reflex_result.robust_recovery,
                         }
                     )
+            formal_filter_result = None
+            if formal_filter is not None:
+                formal_filter_result = formal_filter.filter(
+                    position,
+                    candidate[:3],
+                    FormalObstacle(
+                        tuple(float(value) for value in estimated_position),
+                        tuple(float(value) for value in estimated_velocity),
+                        combined_radius,
+                    ),
+                )
+                candidate[:3] = formal_filter_result.velocity
+                formal_filter_audits.append(
+                    {
+                        "step": step_index,
+                        "time": elapsed,
+                        "intervened": formal_filter_result.intervened,
+                        "one_step_certified": (
+                            formal_filter_result.one_step_certified
+                        ),
+                        "terminal_backup_certified": (
+                            formal_filter_result.terminal_backup_certified
+                        ),
+                        "robust_cbf_residual": (
+                            formal_filter_result.robust_cbf_residual
+                        ),
+                        "backup_authority_margin": (
+                            formal_filter_result.backup_authority_margin
+                        ),
+                    }
+                )
+                if (
+                    cfg.abort_on_formal_certificate_failure
+                    and (
+                        not formal_filter_result.one_step_certified
+                        or not formal_filter_result.terminal_backup_certified
+                    )
+                ):
+                    raise RuntimeError(
+                        "formal safety certificate failed; refusing to send action"
+                    )
             pre_step_position = position.copy()
             pre_step_obstacle = true_obstacle.copy()
             applied_gamma = float(tvp.gamma)
@@ -1237,7 +1394,11 @@ def run_smooth_dynamic_demo(
             model_velocity = feedback_velocity.copy()
             action = paper_control_to_safe_panda_action(
                 candidate, env.action_space.shape[0],
-                linear_input_limit=mpc_config.linear_input_limit,
+                linear_input_limit=(
+                    cfg.formal_filter_speed_limit
+                    if formal_filter is not None
+                    else mpc_config.linear_input_limit
+                ),
                 dt=mpc_config.dt,
             )
             observation, _, terminated, truncated, _ = env.step(action)
@@ -1329,6 +1490,20 @@ def run_smooth_dynamic_demo(
                     "mean_goal_progress_rate": net_progress / elapsed_after_step,
                     "reflex_intervened": reflex_intervened,
                     "reflex_backup_used": reflex_backup_used,
+                    "formal_filter_intervened": bool(
+                        formal_filter_result is not None
+                        and formal_filter_result.intervened
+                    ),
+                    "formal_filter_one_step_certified": (
+                        formal_filter_result.one_step_certified
+                        if formal_filter_result is not None
+                        else None
+                    ),
+                    "formal_terminal_backup_certified": (
+                        formal_filter_result.terminal_backup_certified
+                        if formal_filter_result is not None
+                        else None
+                    ),
                     "reflex_avoidance_side": reflex.latched_side,
                     "reflex_side_switches": reflex.side_switches,
                     "temporary_subgoal": (
@@ -1431,6 +1606,27 @@ def run_smooth_dynamic_demo(
             true_cbf_violation_steps=sum(
                 residual < -cfg.solver_max_constraint_violation
                 for residual in true_cbf_residuals
+            ),
+            formal_filter_interventions=sum(
+                bool(item["intervened"]) for item in formal_filter_audits
+            ),
+            formal_filter_uncertified_steps=sum(
+                not bool(item["one_step_certified"])
+                for item in formal_filter_audits
+            ),
+            formal_terminal_backup_uncertified_steps=sum(
+                not bool(item["terminal_backup_certified"])
+                for item in formal_filter_audits
+            ),
+            minimum_robust_filter_residual=(
+                min(float(item["robust_cbf_residual"]) for item in formal_filter_audits)
+                if formal_filter_audits
+                else None
+            ),
+            minimum_backup_authority_margin=(
+                min(float(item["backup_authority_margin"]) for item in formal_filter_audits)
+                if formal_filter_audits
+                else None
             ),
             final_goal_distance=final_goal_distance,
             initial_goal_distance=initial_goal_distance,
@@ -1536,7 +1732,20 @@ def run_smooth_dynamic_demo(
                     tvp.tube.velocity_error_bound
                 ),
                 "velocity_observer_filter": cfg.velocity_filter,
-                "gaussian_noise_is_deterministically_bounded": False,
+                "measurement_noise_is_deterministically_bounded": (
+                    cfg.measurement_noise_mode == "bounded_ball"
+                ),
+                "measurement_noise_mode": cfg.measurement_noise_mode,
+                "declared_measurement_error_bound_m": (
+                    cfg.measurement_error_bound
+                    if cfg.measurement_noise_mode == "bounded_ball"
+                    else None
+                ),
+                "robot_transition_error_bound_m": (
+                    cfg.formal_robot_transition_error_bound
+                    if cfg.formal_safety_filter_enabled
+                    else None
+                ),
             },
             "applied_gamma_updates": applied_gamma_updates,
             "gamma_trace": gamma_trace,
@@ -1550,6 +1759,7 @@ def run_smooth_dynamic_demo(
             "controls": controls_array.tolist(),
             "nominal_controls": np.asarray(nominal_controls).tolist(),
             "reflex_audits": reflex_audits,
+            "formal_filter_audits": formal_filter_audits,
             "optimal_decay_trace": optimal_decay_trace,
             "true_clearances": true_clearances,
             "measured_clearances": measured_clearances,

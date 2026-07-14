@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import isfinite
+from math import ceil, isfinite
 from typing import Sequence
 
 
@@ -20,14 +20,15 @@ def _vector3(values: Sequence[float], label: str) -> tuple[float, float, float]:
 class UncertaintyTubeConfig:
     """Bounds used to inflate an obstacle over the MPC prediction horizon.
 
-    ``measurement_sigma`` is converted to a bounded working assumption using
-    ``confidence_multiplier``.  This does not turn Gaussian noise into an
-    absolute guarantee; the statistical assumption must be reported with any
-    safety claim.
+    ``measurement_error_bound`` is the deterministic contract used by formal
+    profiles.  When it is ``None``, ``measurement_sigma`` is converted to a
+    statistical working assumption using ``confidence_multiplier``; that mode
+    must not be presented as an absolute guarantee.
     """
 
     measurement_sigma: float = 0.005
     confidence_multiplier: float = 3.0
+    measurement_error_bound: float | None = None
     velocity_error_bound: float = 0.03
     initial_velocity_error_bound: float = 0.20
     model_error_growth: float = 0.005
@@ -36,6 +37,7 @@ class UncertaintyTubeConfig:
     sensor_period: float = 0.67
     control_period: float = 0.04
     obstacle_acceleration_bound: float = 0.0
+    robot_transition_error_bound: float = 0.0
     sampled_data_margin_enabled: bool = True
 
     def __post_init__(self) -> None:
@@ -50,6 +52,7 @@ class UncertaintyTubeConfig:
             self.sensor_period,
             self.control_period,
             self.obstacle_acceleration_bound,
+            self.robot_transition_error_bound,
         )
         if any(not isfinite(value) or value < 0.0 for value in values):
             raise ValueError("uncertainty tube values must be finite and non-negative")
@@ -57,9 +60,21 @@ class UncertaintyTubeConfig:
             raise ValueError("confidence_multiplier must be positive")
         if self.sensor_period == 0.0 or self.control_period == 0.0:
             raise ValueError("sensor_period and control_period must be positive")
+        if (
+            self.measurement_error_bound is not None
+            and (
+                not isfinite(self.measurement_error_bound)
+                or self.measurement_error_bound < 0.0
+            )
+        ):
+            raise ValueError(
+                "measurement_error_bound must be finite and non-negative"
+            )
 
     @property
     def measurement_bound(self) -> float:
+        if self.measurement_error_bound is not None:
+            return self.measurement_error_bound
         return self.confidence_multiplier * self.measurement_sigma
 
     @property
@@ -122,11 +137,13 @@ class UncertaintyTubeConfig:
             (velocity_bound + self.model_error_growth) * age
             + 0.5 * self.obstacle_acceleration_bound * age**2
         )
+        transition_steps = max(1, ceil(age / self.control_period))
         return (
             self.measurement_bound
             + self.latency_bound
             + self.intersample_bound
             + growth
+            + transition_steps * self.robot_transition_error_bound
         )
 
 
