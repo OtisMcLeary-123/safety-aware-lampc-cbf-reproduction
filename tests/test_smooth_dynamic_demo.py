@@ -8,6 +8,7 @@ import pytest
 from lampc_cbf.smooth_dynamic_demo import (
     ReferenceObstacleTVP,
     SmoothDynamicConfig,
+    build_reference_route,
     classify_episode_outcome,
 )
 
@@ -50,6 +51,30 @@ def test_dynamic_configuration_accepts_velocity_only_and_direct_target():
     )
     assert config.prediction_mode == "velocity"
     assert config.reference_mode == "direct_target"
+
+
+def test_3d_reference_route_has_lateral_and_vertical_waypoints() -> None:
+    route, path = build_reference_route(
+        (0.0, 0.0, 0.2),
+        (0.0, 0.3, 0.2),
+        obstacle_velocity=(0.05, 0.0, -0.01),
+        combined_radius=0.035,
+        route_margin=0.08,
+        profile="3d_waypoints",
+        waypoint_offsets=((0.14, 0.08, 0.10), (0.14, 0.23, 0.10)),
+    )
+    assert route.shape[1] == 3
+    assert path.shape[1] == 3
+    assert np.max(np.abs(route[:, 0])) > 0.0
+    assert np.max(np.abs(route[:, 2] - 0.2)) > 0.0
+
+
+def test_3d_route_profile_requires_two_waypoints() -> None:
+    with pytest.raises(ValueError, match="at least two"):
+        SmoothDynamicConfig(
+            reference_route_profile="3d_waypoints",
+            avoidance_waypoint_offsets=((0.1, 0.1, 0.1),),
+        )
 
 
 def test_dynamic_configuration_accepts_experimental_dpcbf_reflex() -> None:

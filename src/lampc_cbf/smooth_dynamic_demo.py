@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+from math import isfinite
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Sequence
 
-from .smoothness import SmoothnessMetrics
+from .smoothness import SmoothnessMetrics, make_reference_bspline
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,7 @@ class SmoothDynamicConfig:
     measurement_error_bound: float = 0.005
     reference_speed: float = 0.12
     goal_offset: tuple[float, float, float] = (0.0, 0.30, 0.0)
+    position_q_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)
     obstacle_start_offset: tuple[float, float, float] = (-0.12, 0.15, 0.0)
     obstacle_velocity: tuple[float, float, float] = (0.06, 0.0, 0.0)
     obstacle_radius: float = 0.10
@@ -74,6 +76,8 @@ class SmoothDynamicConfig:
     avoidance_onset_threshold: float = 0.005
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
+    reference_route_profile: str = "legacy_lateral"
+    avoidance_waypoint_offsets: tuple[tuple[float, float, float], ...] = ()
     safety_mode: str = "cbf"
     # ``command_velocity`` matches the immediate Safe Panda command.
     # ``paper_state`` retains the replacement-state transition.
@@ -120,6 +124,13 @@ class SmoothDynamicConfig:
             raise ValueError("measurement_noise_mode must be gaussian or bounded_ball")
         if self.measurement_error_bound < 0.0:
             raise ValueError("measurement_error_bound must be non-negative")
+        if len(self.position_q_weights) != 3 or any(
+            value < 0.0 or not isfinite(value)
+            for value in self.position_q_weights
+        ):
+            raise ValueError(
+                "position_q_weights must contain three finite non-negative values"
+            )
         if self.obstacle_acceleration_bound < 0.0:
             raise ValueError("obstacle_acceleration_bound must be non-negative")
         if self.gamma_update_ttl <= 0.0:
@@ -128,6 +139,21 @@ class SmoothDynamicConfig:
             raise ValueError(
                 "reference_mode must be behind_spline, straight, or direct_target"
             )
+        if self.reference_route_profile not in {"legacy_lateral", "3d_waypoints"}:
+            raise ValueError(
+                "reference_route_profile must be legacy_lateral or 3d_waypoints"
+            )
+        if any(
+            len(offset) != 3
+            or any(not isfinite(value) for value in offset)
+            for offset in self.avoidance_waypoint_offsets
+        ):
+            raise ValueError("avoidance_waypoint_offsets must contain finite 3-vectors")
+        if (
+            self.reference_route_profile == "3d_waypoints"
+            and len(self.avoidance_waypoint_offsets) < 2
+        ):
+            raise ValueError("3d_waypoints profile requires at least two waypoint offsets")
         if self.prediction_mode not in {"static", "velocity", "velocity_tube"}:
             raise ValueError("prediction_mode must be static, velocity, or velocity_tube")
         if not 0.0 <= self.velocity_filter <= 1.0:
@@ -338,6 +364,52 @@ def sample_obstacle_measurement_noise(
     if magnitude > error_bound > 0.0:
         value *= error_bound / magnitude
     return value
+
+
+def build_reference_route(
+    start: Sequence[float],
+    goal: Sequence[float],
+    *,
+    obstacle_velocity: Sequence[float],
+    combined_radius: float,
+    route_margin: float,
+    profile: str = "legacy_lateral",
+    waypoint_offsets: Sequence[Sequence[float]] = (),
+) -> tuple[Any, Any]:
+    """Build an opt-in 3-D route while retaining the legacy lateral route."""
+
+    import numpy as np
+
+    start_array = np.asarray(start, dtype=float)
+    goal_array = np.asarray(goal, dtype=float)
+    if start_array.shape != (3,) or goal_array.shape != (3,):
+        raise ValueError("start and goal must be three-dimensional")
+    if profile == "legacy_lateral":
+        route_direction = -1.0 if float(obstacle_velocity[0]) >= 0.0 else 1.0
+        route_points = np.asarray(
+            [
+                start_array,
+                start_array + np.array(
+                    [route_direction * (combined_radius + route_margin), 0.075, 0.0]
+                ),
+                start_array + np.array(
+                    [route_direction * (combined_radius + route_margin), 0.225, 0.0]
+                ),
+                goal_array,
+            ]
+        )
+    elif profile == "3d_waypoints":
+        if len(waypoint_offsets) < 2:
+            raise ValueError("3d_waypoints requires at least two waypoint offsets")
+        offsets = np.asarray(waypoint_offsets, dtype=float)
+        if offsets.ndim != 2 or offsets.shape[1] != 3:
+            raise ValueError("waypoint_offsets must have shape (N, 3)")
+        route_points = np.vstack(
+            [start_array, *(start_array + offset for offset in offsets), goal_array]
+        )
+    else:
+        raise ValueError("unknown reference route profile")
+    return route_points, make_reference_bspline(route_points)
 
 
 def classify_episode_outcome(
@@ -833,17 +905,15 @@ def run_smooth_dynamic_demo(
             route_points = np.asarray([start, goal])
             reference_path = np.linspace(start, goal, 600)
         else:
-            route_offset = combined_radius + cfg.route_margin
-            route_direction = -1.0 if obstacle_velocity[0] >= 0.0 else 1.0
-            route_points = np.asarray(
-                [
-                    start,
-                    start + np.array([route_direction * route_offset, 0.075, 0.0]),
-                    start + np.array([route_direction * route_offset, 0.225, 0.0]),
-                    goal,
-                ]
+            route_points, reference_path = build_reference_route(
+                start,
+                goal,
+                obstacle_velocity=obstacle_velocity,
+                combined_radius=combined_radius,
+                route_margin=cfg.route_margin,
+                profile=cfg.reference_route_profile,
+                waypoint_offsets=cfg.avoidance_waypoint_offsets,
             )
-            reference_path = make_reference_bspline(route_points)
         measurement = true_obstacle + sample_obstacle_measurement_noise(
             rng,
             mode=cfg.measurement_noise_mode,
@@ -857,6 +927,7 @@ def run_smooth_dynamic_demo(
         )
         mpc_config = PaperMPCConfig(
             linear_delta_u_weight=cfg.delta_u_weight,
+            position_q_weights=cfg.position_q_weights,
             linear_jerk_weight=cfg.jerk_weight,
             optimal_decay_weight=cfg.optimal_decay_weight,
             optimal_decay_lower=cfg.optimal_decay_lower,

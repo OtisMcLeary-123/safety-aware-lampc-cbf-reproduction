@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "profile": "safe_panda_3d_avoidance_50_extension",
+  "scenario_path": "configs/table4_candidate_50_scenarios.json",
+  "controller": {
+    "initial_gamma": 0.15,
+    "cbf_transition_mode": "command_velocity",
+    "reference_mode": "behind_spline",
+    "reference_route_profile": "3d_waypoints",
+    "reference_speed_mps": 0.12,
+    "goal_offset_m": [0.0, 0.30, 0.0],
+    "avoidance_waypoint_offsets_m": [
+      [0.14, 0.08, 0.10],
+      [0.14, 0.23, 0.10]
+    ],
+    "position_q_weights": [1.0, 1.4, 1.2],
+    "safety_reflex_enabled": true,
+    "reflex_barrier_mode": "collision_cone",
+    "reflex_policy_library_enabled": true,
+    "reflex_tangential_subgoal_enabled": true
+  },
+  "scene": {
+    "obstacle_height_offset_m": 0.06,
+    "obstacle_vertical_velocity_mps": -0.015,
+    "obstacle_radius_m": 0.10,
+    "ee_collision_radius_m": 0.035
+  },
+  "benchmark": {
+    "episodes": 50,
+    "max_steps": 260,
+    "seed_base": 20260715,
+    "bootstrap_resamples": 10000,
+    "paired_methods": [
+      "safe_panda_3d_fixed_g015",
+      "safe_panda_3d_async_feedback"
+    ],
+    "output_dir": "artifacts/safe_panda_3d_avoidance_50_benchmark",
+    "resume_checkpoint": "run_checkpoint.json"
+  },
+  "llm": {
+    "provider_manifest": "configs/paper_fidelity_nvidia_nim_llama31.json",
+    "checkpoint": "artifacts/safe_panda_3d_avoidance_50_provider/feedback_decisions_checkpoint.json",
+    "feedback_query": "Watch out! I think it's going to crash soon. Increase clearance now."
+  },
+  "fidelity": {
+    "exact_table4_reproduction": false,
+    "label": "Opt-in 3-D route and tangential-reflex extension over the deterministic 50-scenario suite",
+    "limitations": [
+      "The route and reflex profile are an engineering extension, not a paper-published Table-4 configuration.",
+      "NVIDIA NIM decisions are model-substitution evidence, not GPT-4o/OpenAI evidence.",
+      "The task contract remains end-effector reach, not verified cube pick/place.",
+      "Provider hazard context is a nominal 3-D spline proxy because exact intervention state is unavailable before replay."
+    ]
+  }
+}

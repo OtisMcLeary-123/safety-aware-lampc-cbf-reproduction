@@ -9,7 +9,7 @@ that have not installed the optional control stack yet.  Call
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import inf, pi
+from math import inf, isfinite, pi
 from typing import Any, Callable, Mapping, Sequence
 
 
@@ -33,6 +33,7 @@ class PaperMPCConfig:
     horizon: int = 15
     target: tuple[float, ...] = (0.0,) * 8
     q_weight: float = 1.0
+    position_q_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)
     linear_delta_u_weight: float = 0.5
     yaw_delta_u_weight: float = 1e-5
     linear_jerk_weight: float = 0.0
@@ -61,6 +62,13 @@ class PaperMPCConfig:
             raise ValueError("horizon must be at least one")
         if len(self.target) != 8:
             raise ValueError("target must contain exactly 8 state values")
+        if len(self.position_q_weights) != 3 or any(
+            value < 0.0 or not isfinite(value)
+            for value in self.position_q_weights
+        ):
+            raise ValueError(
+                "position_q_weights must contain three finite non-negative values"
+            )
         if len(self.position_lower) != 3 or len(self.position_upper) != 3:
             raise ValueError("position bounds must contain exactly 3 values")
         if any(lower >= upper for lower, upper in zip(self.position_lower, self.position_upper)):
@@ -317,7 +325,11 @@ def build_mpc_controller(
     error = x[:8] - target
     velocity_regularizer = cfg.velocity_regularization * ca.dot(x[4:7], x[4:7])
     yaw_regularizer = cfg.yaw_regularization * ca.sin(2.0 * x[3]) ** 2
-    state_cost = cfg.q_weight * ca.dot(error, error)
+    position_error = error[:3]
+    weighted_position_error = ca.diag(ca.DM(cfg.position_q_weights)) @ position_error
+    state_cost = cfg.q_weight * (
+        ca.dot(weighted_position_error, position_error) + ca.dot(error[3:], error[3:])
+    )
     terminal_cost = state_cost + velocity_regularizer + yaw_regularizer
     stage_cost = terminal_cost
     if cfg.uses_jerk_state:

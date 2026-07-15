@@ -27,6 +27,7 @@ def test_paper_dimensions_and_default_parameters() -> None:
     assert not config.uses_jerk_state
     assert not config.uses_optimal_decay
     assert config.delta_u_weights == pytest.approx((0.5, 0.5, 0.5, 1e-5))
+    assert config.position_q_weights == pytest.approx((1.0, 1.0, 1.0))
     assert config.input_lower == pytest.approx((-0.2, -0.2, -0.2, -math.pi))
     assert config.input_upper == pytest.approx((0.2, 0.2, 0.2, math.pi))
     assert config.state_lower[:4] == pytest.approx(
@@ -105,6 +106,9 @@ def test_dynamics_matrix_dispatch_preserves_paper_mode() -> None:
         ({"optimal_decay_lower": 0.0}, "optimal decay bounds"),
         ({"optimal_decay_upper": 1.1}, "optimal decay bounds"),
         ({"dynamics_mode": "unknown"}, "dynamics_mode"),
+        ({"position_q_weights": (1.0, 2.0)}, "position_q_weights"),
+        ({"position_q_weights": (1.0, -1.0, 1.0)}, "position_q_weights"),
+        ({"position_q_weights": (1.0, float("nan"), 1.0)}, "position_q_weights"),
     ],
 )
 def test_invalid_configuration_is_rejected(
