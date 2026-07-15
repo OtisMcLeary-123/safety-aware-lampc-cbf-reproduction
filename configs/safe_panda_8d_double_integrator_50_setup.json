@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "profile": "safe_panda_8d_double_integrator_scenario_extension",
+  "scenario_path": "configs/table4_candidate_50_scenarios.json",
+  "coordinate_frame": {
+    "origin": "seeded PandaReachSafe-v3 end-effector position",
+    "axes": {"x": "lateral", "y": "goal-forward", "z": "up"},
+    "state_order": ["x", "y", "z", "psi", "dx", "dy", "dz", "dpsi"],
+    "input_order": ["u_x", "u_y", "u_z", "u_psi"],
+    "goal_contract": "ee_reach_only",
+    "goal_offset_m": [0.0, 0.30, 0.0],
+    "goal_tolerance_m": 0.05,
+    "pick_place_cube": false
+  },
+  "environment": {
+    "id": "PandaReachSafe-v3",
+    "renderer": "Tiny",
+    "control_period_s": 0.04,
+    "action_mapping": "clip((v_xyz + 0.5*dt*u_xyz) * dt / 0.05, -1, 1)",
+    "collision_semantics": "analytical_ee_clearance_against_ghost_obstacle",
+    "whole_arm_collision_certificate": false
+  },
+  "controller": {
+    "model": "canonical_8d_discrete_double_integrator",
+    "dt_s": 0.04,
+    "horizon": 15,
+    "cbf_transition_mode": "double_integrator",
+    "prediction_mode": "static",
+    "initial_gamma": 0.15,
+    "linear_input_bounds_mps2": [-0.2, 0.2],
+    "safety_reflex_enabled": false,
+    "formal_filter_enabled": false,
+    "reference_mode": "direct_target"
+  },
+  "sensing": {
+    "period_s": 0.67,
+    "noise_mode": "gaussian",
+    "noise_sigma_m": 0.005,
+    "obstacle_motion_in_horizon": "static_measured_obstacle"
+  },
+  "scene": {
+    "obstacle_radius_m": 0.0,
+    "ee_collision_radius_m": 0.035,
+    "obstacle_geometry_status": "candidate_point_obstacle_extension"
+  },
+  "benchmark": {
+    "episodes": 50,
+    "max_steps": 220,
+    "seed_base": 20260715,
+    "bootstrap_resamples": 10000,
+    "one_feedback_request_per_episode": true,
+    "latency_mode": "precollected_uncached_per_episode_replay",
+    "paired_methods": ["safe_panda_8d_fixed_g015", "safe_panda_8d_async_feedback"],
+    "output_dir": "artifacts/safe_panda_8d_double_integrator_50_benchmark"
+  },
+  "llm": {
+    "provider_manifest": "configs/paper_fidelity_nvidia_nim_llama31.json",
+    "checkpoint": "artifacts/safe_panda_8d_double_integrator_50_contextual_nim_llama31/feedback_decisions_checkpoint.json",
+    "initial_query": "Move gripper to red cube.",
+    "feedback_query": "Watch out! I think it's going to crash soon."
+  },
+  "fidelity": {
+    "exact_table4_reproduction": false,
+    "paper_state_transition": false,
+    "double_integrator_transition": true,
+    "goal_contract_explicit": true,
+    "label": "Safe Panda 8D double-integrator controller with candidate scenario extension",
+    "limitations": [
+      "The goal is reach-only EE displacement, not a verified red-cube pick/place task.",
+      "Obstacle radii, initial poses, action mapping, and intervention distribution are reconstructed.",
+      "NVIDIA NIM decisions are model-substitution evidence, not GPT-4o/OpenAI evidence."
+    ]
+  }
+}

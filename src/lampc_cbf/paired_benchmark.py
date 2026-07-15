@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .hf_llm import GammaDecision
+from .paper_manifest import PaperFidelityManifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,15 +33,46 @@ class PairedBenchmarkConfig:
     output_dir: str = "artifacts/paired_benchmark_protocol_v5_500"
     resume: bool = True
     feedback_schedule_mode: str = "ttc"
+    feedback_request_policy: str = "one_shot_per_feedback_episode"
+    feedback_requests_per_episode: int = 1
+    latency_trace_mode: str = "precollected_uncached_per_episode_replay"
     feedback_ttc_threshold: float = 1.5
     efficacy_method: str = "paper_async_feedback_static"
     efficacy_comparator: str = "fixed_cbf_static_g015"
     efficacy_alpha: float = 0.05
     efficacy_minimum_paired_difference: float = 0.0
+    method_names: tuple[str, ...] = ()
+    fixed_lateral_offset: float | None = None
+    sensor_period: float = 0.67
+    measurement_noise_sigma: float = 0.005
+    reference_speed: float = 0.08
+    cbf_transition_mode: str = "command_velocity"
+    manifest_path: str | None = None
+    manifest_hash: str | None = None
+    manifest_profile: str | None = None
+    model_substitution: bool = False
+    goal_offset: tuple[float, float, float] = (0.0, 0.30, 0.0)
+    obstacle_start_forward_offset: float = 0.44
+    obstacle_start_vertical_offset: float = 0.0
+    obstacle_radius: float = 0.10
+    collision_radius: float = 0.035
+    gamma_update_ttl: float = 1.0
+    solver_max_constraint_violation: float = 1e-6
+    solver_max_cpu_time: float = 0.035
+    control_deadline: float = 0.04
+    reject_deadline_miss: bool = False
+    initial_query: str = "Move gripper to red cube."
+    feedback_prompt: str = (
+        "Watch out! I think the robot is going to crash soon. Increase clearance now."
+    )
 
     def __post_init__(self) -> None:
-        if self.stage not in {"smoke", "development", "confirmatory"}:
-            raise ValueError("stage must be smoke, development, or confirmatory")
+        if self.stage not in {
+            "smoke", "development", "paper-replication", "confirmatory",
+        }:
+            raise ValueError(
+                "stage must be smoke, development, paper-replication, or confirmatory"
+            )
         if self.episodes < 1 or self.bootstrap_resamples < 1:
             raise ValueError("episode and bootstrap counts must be positive")
         if self.max_steps < 4 or self.workers < 1:
@@ -49,16 +81,165 @@ class PairedBenchmarkConfig:
             raise ValueError("invalid obstacle speed interval")
         if not 0.0 <= self.lateral_lower < self.lateral_upper:
             raise ValueError("invalid lateral-offset interval")
+        if self.fixed_lateral_offset is not None and not isfinite(
+            self.fixed_lateral_offset
+        ):
+            raise ValueError("fixed lateral offset must be finite")
         if not 0.0 <= self.intervention_time_lower <= self.intervention_time_upper:
             raise ValueError("invalid intervention-time interval")
         if self.feedback_schedule_mode not in {"elapsed_time", "ttc"}:
             raise ValueError("feedback_schedule_mode must be elapsed_time or ttc")
+        if self.feedback_requests_per_episode < 1:
+            raise ValueError("feedback requests per episode must be positive")
         if self.feedback_ttc_threshold <= 0.0:
             raise ValueError("feedback_ttc_threshold must be positive")
         if not 0.0 < self.efficacy_alpha < 1.0:
             raise ValueError("efficacy_alpha must be in (0, 1)")
         if not -1.0 <= self.efficacy_minimum_paired_difference <= 1.0:
             raise ValueError("efficacy minimum paired difference must be in [-1, 1]")
+        if self.sensor_period <= 0.0 or self.measurement_noise_sigma < 0.0:
+            raise ValueError("sensor period must be positive and noise non-negative")
+        if self.reference_speed <= 0.0:
+            raise ValueError("reference speed must be positive")
+        if len(self.goal_offset) != 3:
+            raise ValueError("goal offset must contain three values")
+        if self.obstacle_start_forward_offset <= 0.0:
+            raise ValueError("obstacle forward offset must be positive")
+        if self.obstacle_radius <= 0.0 or self.collision_radius <= 0.0:
+            raise ValueError("obstacle and collision radii must be positive")
+        if self.gamma_update_ttl <= 0.0:
+            raise ValueError("gamma update TTL must be positive")
+        if any(
+            value <= 0.0
+            for value in (
+                self.solver_max_constraint_violation,
+                self.solver_max_cpu_time,
+                self.control_deadline,
+            )
+        ):
+            raise ValueError("solver tolerances and deadlines must be positive")
+        if not self.initial_query.strip() or not self.feedback_prompt.strip():
+            raise ValueError("paper queries must be non-empty")
+        if self.cbf_transition_mode not in {"paper_state", "command_velocity"}:
+            raise ValueError("invalid CBF transition mode")
+        if len(set(self.method_names)) != len(self.method_names):
+            raise ValueError("method names must be unique")
+        if self.stage == "paper-replication":
+            required_methods = (
+                "fixed_cbf_static_g015",
+                "paper_async_feedback_static",
+            )
+            if self.episodes != 50:
+                raise ValueError("paper-replication requires exactly 50 episodes")
+            if self.feedback_schedule_mode != "elapsed_time":
+                raise ValueError("paper-replication requires elapsed-time feedback")
+            if self.feedback_request_policy != "one_shot_per_feedback_episode":
+                raise ValueError(
+                    "paper-replication requires one-shot feedback per feedback episode"
+                )
+            if self.feedback_requests_per_episode != 1:
+                raise ValueError(
+                    "paper-replication requires exactly one feedback request per episode"
+                )
+            if self.latency_trace_mode != (
+                "precollected_uncached_per_episode_replay"
+            ):
+                raise ValueError(
+                    "paper-replication requires the frozen per-episode latency trace mode"
+                )
+            if self.method_names != required_methods:
+                raise ValueError(
+                    "paper-replication requires the frozen paper-fidelity method pair"
+                )
+            if self.fixed_lateral_offset is None:
+                raise ValueError("paper-replication requires a fixed scene offset")
+            if self.manifest_path is None or self.manifest_hash is None:
+                raise ValueError("paper-replication requires a validated manifest")
+            if self.manifest_profile not in {
+                "paper_fidelity", "paper_fidelity_model_substitution",
+            }:
+                raise ValueError("paper-replication requires a known manifest profile")
+            if len(self.manifest_hash) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in self.manifest_hash
+            ):
+                raise ValueError("manifest hash must be a lowercase SHA-256 digest")
+
+
+def validate_feedback_decision_trace(
+    feedback_decisions: Sequence[GammaDecision],
+    config: PairedBenchmarkConfig,
+) -> tuple[GammaDecision, ...]:
+    """Validate that every episode has its own usable feedback request record."""
+
+    decisions = tuple(feedback_decisions)
+    expected_count = config.episodes * config.feedback_requests_per_episode
+    if len(decisions) != expected_count:
+        raise ValueError(
+            "benchmark requires exactly one feedback decision per episode"
+            if config.feedback_requests_per_episode == 1
+            else f"benchmark requires exactly {expected_count} feedback decisions"
+        )
+    if any(decision.fallback_used for decision in decisions):
+        raise ValueError("benchmark requires validated non-fallback feedback decisions")
+    if any(
+        not isfinite(decision.latency_seconds) or decision.latency_seconds < 0.0
+        for decision in decisions
+    ):
+        raise ValueError("feedback latencies must be finite and non-negative")
+    if config.stage == "paper-replication":
+        if any(decision.cache_hit for decision in decisions):
+            raise ValueError(
+                "paper-replication requires one uncached feedback request per episode"
+            )
+        request_times = [decision.requested_at_unix for decision in decisions]
+        if any(not isfinite(timestamp) for timestamp in request_times):
+            raise ValueError("feedback request timestamps must be finite")
+        if len(set(request_times)) != config.episodes:
+            raise ValueError(
+                "paper-replication rejects a single frozen latency sample; "
+                "provide one distinct request record per episode"
+            )
+    return decisions
+
+
+def load_feedback_checkpoint(
+    path: str | Path,
+    *,
+    episodes: int,
+    paper_manifest: PaperFidelityManifest | None,
+) -> list[GammaDecision]:
+    """Load a validated provider-decision prefix without repeating requests."""
+
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("feedback checkpoint must contain a JSON list")
+    if len(payload) > episodes:
+        raise ValueError("feedback checkpoint contains more decisions than episodes")
+    decisions: list[GammaDecision] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("feedback decision entries must be JSON objects")
+        decisions.append(
+            GammaDecision(raw_response=None, **item)
+            if "raw_response" not in item
+            else GammaDecision(**item)
+        )
+    if any(decision.fallback_used or decision.cache_hit for decision in decisions):
+        raise ValueError("feedback checkpoint contains fallback or cached decisions")
+    request_times = [decision.requested_at_unix for decision in decisions]
+    if len(set(request_times)) != len(request_times):
+        raise ValueError("feedback checkpoint request timestamps must be distinct")
+    if paper_manifest is not None and any(
+        not paper_manifest.accepts_feedback_decision(
+            model=decision.model,
+            provider=decision.provider,
+            cache_hit=decision.cache_hit,
+        )
+        for decision in decisions
+    ):
+        raise ValueError("feedback checkpoint does not match the paper manifest")
+    return decisions
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +331,29 @@ METHODS: tuple[BenchmarkMethod, ...] = (
 )
 
 
+def configured_methods(config: PairedBenchmarkConfig) -> tuple[BenchmarkMethod, ...]:
+    """Return the frozen method set selected for this benchmark stage."""
+
+    by_name = {method.name: method for method in METHODS}
+    names = config.method_names or tuple(by_name)
+    unknown = [name for name in names if name not in by_name]
+    if unknown:
+        raise ValueError(f"unknown benchmark methods: {unknown}")
+    selected = tuple(by_name[name] for name in names)
+    selected_names = {method.name for method in selected}
+    missing_comparators = sorted({
+        method.comparator
+        for method in selected
+        if method.comparator not in selected_names
+    })
+    if missing_comparators:
+        raise ValueError(
+            "selected methods omit required comparators: "
+            + ", ".join(missing_comparators)
+        )
+    return selected
+
+
 def exact_mcnemar_pvalue(baseline: Sequence[bool], method: Sequence[bool]) -> float:
     """Two-sided exact McNemar test using the binomial distribution."""
 
@@ -208,8 +412,14 @@ def _conditions(config: PairedBenchmarkConfig) -> list[dict[str, Any]]:
 
     rng = np.random.default_rng(config.seed)
     speeds = rng.uniform(config.speed_lower, config.speed_upper, config.episodes)
-    lateral = rng.uniform(config.lateral_lower, config.lateral_upper, config.episodes)
-    signs = rng.choice((-1.0, 1.0), config.episodes)
+    if config.fixed_lateral_offset is None:
+        lateral = rng.uniform(
+            config.lateral_lower, config.lateral_upper, config.episodes
+        )
+        signs = rng.choice((-1.0, 1.0), config.episodes)
+        lateral_offsets = signs * lateral
+    else:
+        lateral_offsets = np.full(config.episodes, config.fixed_lateral_offset)
     interventions = rng.uniform(
         config.intervention_time_lower,
         config.intervention_time_upper,
@@ -220,7 +430,7 @@ def _conditions(config: PairedBenchmarkConfig) -> list[dict[str, Any]]:
             "episode": index,
             "seed": 100_000 + index,
             "obstacle_speed": float(speeds[index]),
-            "lateral_offset": float(signs[index] * lateral[index]),
+            "lateral_offset": float(lateral_offsets[index]),
             "intervention_time": float(interventions[index]),
         }
         for index in range(config.episodes)
@@ -238,8 +448,17 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     feedback_ttc_threshold = float(payload.get("feedback_ttc_threshold", 1.5))
     protocol_version = int(payload.get("protocol_version", 5))
     benchmark_stage = str(payload.get("benchmark_stage", "confirmatory"))
+    selected_names = tuple(str(name) for name in payload.get("method_names", ()))
+    if selected_names:
+        methods_by_name = {method.name: method for method in METHODS}
+        try:
+            selected_methods = tuple(methods_by_name[name] for name in selected_names)
+        except KeyError as exc:
+            raise ValueError(f"unknown payload method: {exc.args[0]}") from exc
+    else:
+        selected_methods = METHODS
     rows: list[dict[str, Any]] = []
-    for method in METHODS:
+    for method in selected_methods:
         method_feedback_mode = (
             feedback_schedule_mode
             if method.feedback_trigger_mode == "configured"
@@ -254,7 +473,8 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             gamma=method.gamma,
             seed=int(condition["seed"]),
             max_steps=max_steps,
-            reference_speed=0.08,
+            reference_speed=float(payload.get("reference_speed", 0.08)),
+            goal_offset=tuple(payload.get("goal_offset", (0.0, 0.30, 0.0))),
             reference_mode=method.reference_mode,
             safety_mode=method.safety_mode,
             prediction_mode=method.prediction_mode,
@@ -262,8 +482,15 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             measurement_noise_mode=(
                 "bounded_ball" if method.bounded_measurement_noise else "gaussian"
             ),
+            measurement_noise_sigma=float(
+                payload.get("measurement_noise_sigma", 0.005)
+            ),
             measurement_error_bound=0.005,
-            sensor_period=(0.04 if method.bounded_measurement_noise else 0.67),
+            sensor_period=(
+                0.04
+                if method.bounded_measurement_noise
+                else float(payload.get("sensor_period", 0.67))
+            ),
             known_obstacle_velocity=method.known_obstacle_velocity,
             formal_safety_filter_enabled=method.formal_safety_filter_enabled,
             formal_robot_transition_error_bound=0.008,
@@ -293,13 +520,28 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 if method.online_feedback and method_feedback_mode == "ttc"
                 else None
             ),
-            gamma_update_ttl=1.0,
-            obstacle_start_offset=(condition["lateral_offset"], 0.44, 0.0),
+            gamma_update_ttl=float(payload.get("gamma_update_ttl", 1.0)),
+            obstacle_start_offset=(
+                condition["lateral_offset"],
+                float(payload.get("obstacle_start_forward_offset", 0.44)),
+                float(payload.get("obstacle_start_vertical_offset", 0.0)),
+            ),
             obstacle_velocity=(0.0, -condition["obstacle_speed"], 0.0),
+            obstacle_radius=float(payload.get("obstacle_radius", 0.10)),
+            collision_radius=float(payload.get("collision_radius", 0.035)),
+            solver_max_constraint_violation=float(
+                payload.get("solver_max_constraint_violation", 1e-6)
+            ),
+            solver_max_cpu_time=float(payload.get("solver_max_cpu_time", 0.035)),
+            control_deadline=float(payload.get("control_deadline", 0.04)),
+            reject_deadline_miss=bool(payload.get("reject_deadline_miss", False)),
             save_animation=False,
             save_plots=False,
             save_metrics=False,
             output_dir=f"/tmp/lampc-paired-{os.getpid()}",
+            cbf_transition_mode=str(
+                payload.get("cbf_transition_mode", "command_velocity")
+            ),
         )
         result = run_smooth_dynamic_demo(config)
         formal_exact_or_bounded_observation = bool(
@@ -375,6 +617,7 @@ def _run_paired_condition(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "protocol_version": protocol_version,
                 "benchmark_stage": benchmark_stage,
                 "max_steps_budget": max_steps,
+                "manifest_hash": payload.get("manifest_hash"),
                 "method": method.name,
                 "comparator": method.comparator,
                 "experiment_profile": method.experiment_profile,
@@ -531,13 +774,13 @@ def _read_checkpoint(path: Path) -> list[dict[str, Any]]:
     }
     text_fields = {
         "benchmark_stage", "method", "comparator", "experiment_profile", "outcome",
-        "feedback_schedule_mode",
+        "feedback_schedule_mode", "manifest_hash",
     }
     for row in rows:
         parsed: dict[str, Any] = {}
         for key, value in row.items():
             if key in text_fields:
-                parsed[key] = value
+                parsed[key] = None if value in {"", "None"} else value
             elif key in boolean_fields:
                 parsed[key] = value == "True"
             elif key in integer_fields:
@@ -564,7 +807,8 @@ def summarize_paired_rows(
 ) -> dict[str, Any]:
     import numpy as np
 
-    expected = {method.name for method in METHODS}
+    methods = configured_methods(config)
+    expected = {method.name for method in methods}
     present = {str(row["method"]) for row in rows}
     if present != expected:
         raise ValueError("rows do not contain exactly the configured methods")
@@ -576,9 +820,9 @@ def summarize_paired_rows(
             (row for row in rows if row["method"] == method.name),
             key=lambda row: int(row["episode"]),
         )
-        for method in METHODS
+        for method in methods
     }
-    for method in METHODS:
+    for method in methods:
         method_rows = by_method[method.name]
         if len(method_rows) != config.episodes:
             raise ValueError(f"method {method.name} does not have {config.episodes} episodes")
@@ -852,7 +1096,7 @@ def evaluate_confirmatory_efficacy_gate(
         "bootstrap_95_ci_lower_above_margin": lower > margin,
         "exact_two_sided_mcnemar_p_at_most_alpha": pvalue <= config.efficacy_alpha,
     }
-    evaluated = config.stage == "confirmatory"
+    evaluated = config.stage in {"paper-replication", "confirmatory"}
     return {
         "evaluated": evaluated,
         "passed": all(checks.values()) if evaluated else None,
@@ -878,6 +1122,13 @@ def evaluate_secondary_robust_contrast(
 
     method_name = "robust_stack_async_feedback"
     comparator_name = "robust_stack_fixed_g015"
+    if method_name not in summaries or comparator_name not in summaries:
+        return {
+            "evaluated_as_gate": False,
+            "method": method_name,
+            "comparator": comparator_name,
+            "reason": "robust extension methods were not selected for this stage",
+        }
     method = summaries[method_name]
     if method.get("comparator") != comparator_name:
         raise ValueError("robust extension comparator is not isolated")
@@ -905,6 +1156,18 @@ def evaluate_formal_contract_gate(
     """
 
     method_names = ("formal_stack_fixed_g015", "formal_stack_async_feedback")
+    if not any(name in summaries for name in method_names):
+        return {
+            "evaluated": False,
+            "passed": None,
+            "scope": (
+                "formal extension methods were not selected for this stage"
+            ),
+            "whole_body_panda_certified": False,
+            "checks": {},
+        }
+    if not all(name in summaries for name in method_names):
+        raise ValueError("formal contract gate requires both formal methods")
     checks: dict[str, bool] = {}
     for name in method_names:
         summary = summaries[name]
@@ -937,11 +1200,16 @@ def evaluate_formal_contract_gate(
     }
 
 
-def _plot_summary(rows: Sequence[Mapping[str, Any]], summaries: Mapping[str, Any], path: Path) -> None:
+def _plot_summary(
+    rows: Sequence[Mapping[str, Any]],
+    summaries: Mapping[str, Any],
+    methods: Sequence[BenchmarkMethod],
+    path: Path,
+) -> None:
     import matplotlib.pyplot as plt
     import numpy as np
 
-    labels = [method.name for method in METHODS]
+    labels = [method.name for method in methods]
     rates = [summaries[name]["success_rate"] for name in labels]
     lower = [rates[i] - summaries[name]["success_bootstrap_95_ci"][0] for i, name in enumerate(labels)]
     upper = [summaries[name]["success_bootstrap_95_ci"][1] - rates[i] for i, name in enumerate(labels)]
@@ -974,16 +1242,8 @@ def run_paired_benchmark(
     """Run or resume all methods on identical Safe Panda Gym conditions."""
 
     cfg = config or PairedBenchmarkConfig()
-    decisions = tuple(feedback_decisions)
-    if len(decisions) != cfg.episodes:
-        raise ValueError("benchmark requires one feedback decision per episode")
-    if any(decision.fallback_used for decision in decisions):
-        raise ValueError("benchmark requires validated non-fallback feedback decisions")
-    if any(
-        not isfinite(decision.latency_seconds) or decision.latency_seconds < 0.0
-        for decision in decisions
-    ):
-        raise ValueError("feedback latencies must be finite and non-negative")
+    methods = configured_methods(cfg)
+    decisions = validate_feedback_decision_trace(feedback_decisions, cfg)
     root = Path(cfg.output_dir)
     root.mkdir(parents=True, exist_ok=True)
     csv_path = root / "episodes.csv"
@@ -992,6 +1252,7 @@ def run_paired_benchmark(
         int(row.get("protocol_version", -1)) != 5
         or row.get("benchmark_stage") != cfg.stage
         or int(row.get("max_steps_budget", -1)) != cfg.max_steps
+        or row.get("manifest_hash") != cfg.manifest_hash
         for row in rows
     ):
         raise ValueError(
@@ -1001,7 +1262,7 @@ def run_paired_benchmark(
     complete = {
         int(episode)
         for episode in {row["episode"] for row in rows}
-        if sum(int(row["episode"]) == int(episode) for row in rows) == len(METHODS)
+        if sum(int(row["episode"]) == int(episode) for row in rows) == len(methods)
     }
     conditions = [item for item in _conditions(cfg) if item["episode"] not in complete]
     if rows:
@@ -1040,6 +1301,22 @@ def run_paired_benchmark(
             "protocol_version": 5,
             "benchmark_stage": cfg.stage,
             "speed_upper": cfg.speed_upper,
+            "method_names": tuple(method.name for method in methods),
+            "sensor_period": cfg.sensor_period,
+            "measurement_noise_sigma": cfg.measurement_noise_sigma,
+            "reference_speed": cfg.reference_speed,
+            "cbf_transition_mode": cfg.cbf_transition_mode,
+            "manifest_hash": cfg.manifest_hash,
+            "goal_offset": cfg.goal_offset,
+            "obstacle_start_forward_offset": cfg.obstacle_start_forward_offset,
+            "obstacle_start_vertical_offset": cfg.obstacle_start_vertical_offset,
+            "obstacle_radius": cfg.obstacle_radius,
+            "collision_radius": cfg.collision_radius,
+            "gamma_update_ttl": cfg.gamma_update_ttl,
+            "solver_max_constraint_violation": cfg.solver_max_constraint_violation,
+            "solver_max_cpu_time": cfg.solver_max_cpu_time,
+            "control_deadline": cfg.control_deadline,
+            "reject_deadline_miss": cfg.reject_deadline_miss,
         }
         for condition in conditions
     ]
@@ -1065,9 +1342,20 @@ def run_paired_benchmark(
     secondary_robust_contrast = evaluate_secondary_robust_contrast(summaries, cfg)
     formal_contract_gate = evaluate_formal_contract_gate(summaries, cfg)
     summary = {
-        "study_id": f"safe-panda-paired-protocol-v5-{cfg.episodes}",
+        "study_id": f"safe-panda-paired-protocol-v5-{cfg.stage}-{cfg.episodes}",
         "protocol_version": 5,
         "config": asdict(cfg),
+        "selected_methods": [method.name for method in methods],
+        "paper_fidelity_manifest": (
+            {
+                "path": cfg.manifest_path,
+                "sha256": cfg.manifest_hash,
+                "profile": cfg.manifest_profile,
+                "model_substitution": cfg.model_substitution,
+            }
+            if cfg.manifest_hash is not None
+            else None
+        ),
         "methods": summaries,
         "efficacy_gate": efficacy_gate,
         "secondary_robust_contrast": secondary_robust_contrast,
@@ -1081,7 +1369,9 @@ def run_paired_benchmark(
             for decision in decisions
         ],
         "feedback_latency": {
-            "mode": "measured_per_episode",
+            "mode": cfg.latency_trace_mode,
+            "request_policy": cfg.feedback_request_policy,
+            "requests_per_episode": cfg.feedback_requests_per_episode,
             "request_count": len(decisions),
             "minimum_seconds": min(decision.latency_seconds for decision in decisions),
             "mean_seconds": sum(
@@ -1124,6 +1414,8 @@ def run_paired_benchmark(
     (root / "benchmark_summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
-    _plot_summary(rows, summaries, root / "paired_success_and_clearance.png")
+    _plot_summary(
+        rows, summaries, methods, root / "paired_success_and_clearance.png"
+    )
     print("[paired] complete", flush=True)
     return summary

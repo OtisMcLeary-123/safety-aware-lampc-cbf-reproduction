@@ -12,3 +12,11 @@ dist/
 hftoken.txt
 nvidiatoken.txt
 results/
+
+# Keep generated experiments out of version control except the final aggregate
+# Safe Panda 8-D evidence explicitly selected for the repository record.
+artifacts/*
+!artifacts/safe_panda_8d_double_integrator_50_benchmark/
+!artifacts/safe_panda_8d_double_integrator_50_benchmark/benchmark_summary.json
+!artifacts/safe_panda_8d_double_integrator_50_benchmark/episodes.csv
+artifacts/safe_panda_8d_double_integrator_50_contextual_nim_llama31/

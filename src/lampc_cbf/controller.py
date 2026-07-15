@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 STATE_NAMES = ("x", "y", "z", "psi", "dx", "dy", "dz", "dpsi")
 INPUT_NAMES = ("u_x", "u_y", "u_z", "u_psi")
+DYNAMICS_MODES = ("paper_state", "double_integrator")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,9 @@ class PaperMPCConfig:
     yaw_upper: float = 0.55 * pi
     linear_input_limit: float = 0.2
     yaw_input_limit: float = pi
+    # ``paper_state`` retains the repository replacement-state convention.
+    # ``double_integrator`` is an explicit source-validation mode.
+    dynamics_mode: str = "paper_state"
 
     def __post_init__(self) -> None:
         if self.dt <= 0.0:
@@ -77,6 +81,10 @@ class PaperMPCConfig:
             raise ValueError("objective weights must be non-negative")
         if self.linear_input_limit <= 0.0 or self.yaw_input_limit <= 0.0:
             raise ValueError("input limits must be positive")
+        if self.dynamics_mode not in DYNAMICS_MODES:
+            raise ValueError(
+                "dynamics_mode must be paper_state or double_integrator"
+            )
         if self.target_tvp_name == "":
             raise ValueError("target_tvp_name must be non-empty when provided")
         if not 0.0 < self.optimal_decay_lower <= self.optimal_decay_nominal <= self.optimal_decay_upper <= 1.0:
@@ -118,23 +126,93 @@ def paper_dynamics_matrices(
 ) -> tuple[tuple[tuple[float, ...], ...], tuple[tuple[float, ...], ...]]:
     """Return the paper's 8-by-8 ``A`` and 8-by-4 ``B`` as plain tuples."""
 
+    return dynamics_matrices(dt, mode="paper_state")
+
+
+def double_integrator_dynamics_matrices(
+    dt: float = 0.04,
+) -> tuple[tuple[tuple[float, ...], ...], tuple[tuple[float, ...], ...]]:
+    """Return exact-discretized double-integrator matrices.
+
+    The first four states are pose and the last four are velocities. Linear
+    inputs are accelerations, so position receives ``0.5*dt**2*u`` and velocity
+    receives ``dt*u``. This mode is opt-in because it is not the frozen
+    paper-state convention used by the paper-facing profile.
+    """
+
     if dt <= 0.0:
         raise ValueError("dt must be positive")
-
     a = tuple(
         tuple(
             float(row == column)
             if row < 4 and column < 4
-            else (dt if row < 4 and column == row + 4 else 0.0)
+            else (
+                dt
+                if row < 4 and column == row + 4
+                else float(row == column) if row >= 4 else 0.0
+            )
             for column in range(8)
         )
         for row in range(8)
     )
     b = tuple(
-        tuple(float(row >= 4 and column == row - 4) for column in range(4))
+        tuple(
+            0.5 * dt**2
+            if row < 4 and column == row
+            else (dt if row >= 4 and column == row - 4 else 0.0)
+            for column in range(4)
+        )
         for row in range(8)
     )
     return a, b
+
+
+def dynamics_matrices(
+    dt: float = 0.04,
+    *,
+    mode: str = "paper_state",
+) -> tuple[tuple[tuple[float, ...], ...], tuple[tuple[float, ...], ...]]:
+    """Return the canonical A/B pair for a configured transition mode."""
+
+    if mode == "paper_state":
+        if dt <= 0.0:
+            raise ValueError("dt must be positive")
+        a = tuple(
+            tuple(
+                float(row == column)
+                if row < 4 and column < 4
+                else (dt if row < 4 and column == row + 4 else 0.0)
+                for column in range(8)
+            )
+            for row in range(8)
+        )
+        b = tuple(
+            tuple(float(row >= 4 and column == row - 4) for column in range(4))
+            for row in range(8)
+        )
+        return a, b
+    if mode == "double_integrator":
+        return double_integrator_dynamics_matrices(dt)
+    raise ValueError("mode must be paper_state or double_integrator")
+
+
+def discrete_state_transition(
+    state: Sequence[float],
+    control: Sequence[float],
+    *,
+    dt: float = 0.04,
+    mode: str = "paper_state",
+) -> tuple[float, ...]:
+    """Advance one state using the same A/B pair as the do-mpc model."""
+
+    if len(state) != 8 or len(control) != 4:
+        raise ValueError("state and control must contain 8 and 4 values")
+    a, b = dynamics_matrices(dt, mode=mode)
+    return tuple(
+        sum(a[row][column] * float(state[column]) for column in range(8))
+        + sum(b[row][column] * float(control[column]) for column in range(4))
+        for row in range(8)
+    )
 
 
 ConstraintBuilder = Callable[[Any, Any, Any, Any, Any], None]
@@ -199,7 +277,7 @@ def build_mpc_controller(
         if cfg.uses_optimal_decay
         else None
     )
-    a_values, b_values = paper_dynamics_matrices(cfg.dt)
+    a_values, b_values = dynamics_matrices(cfg.dt, mode=cfg.dynamics_mode)
     a = ca.DM(a_values)
     b = ca.DM(b_values)
     paper_state_rhs = ca.mtimes(a, x[:8]) + ca.mtimes(b, u)

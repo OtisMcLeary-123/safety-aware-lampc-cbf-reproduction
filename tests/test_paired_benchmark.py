@@ -1,12 +1,21 @@
+import json
+from dataclasses import replace
+
 import pytest
 
+from lampc_cbf.hf_llm import GammaDecision
+from lampc_cbf.paper_manifest import PaperFidelityManifest
 from lampc_cbf.paired_benchmark import (
     METHODS,
     PairedBenchmarkConfig,
+    _conditions,
+    configured_methods,
     evaluate_confirmatory_efficacy_gate,
     evaluate_formal_contract_gate,
     exact_mcnemar_pvalue,
     summarize_paired_rows,
+    load_feedback_checkpoint,
+    validate_feedback_decision_trace,
 )
 
 
@@ -40,6 +49,93 @@ def test_protocol_separates_paper_fidelity_from_robust_extension():
     assert formal.formal_safety_filter_enabled
     assert formal.bounded_measurement_noise
     assert formal.known_obstacle_velocity
+
+
+def test_paper_replication_stage_uses_manifest_locked_pair_and_scene():
+    manifest = PaperFidelityManifest.load("configs/paper_fidelity.json")
+    config = PairedBenchmarkConfig(**manifest.benchmark_kwargs())
+
+    assert config.stage == "paper-replication"
+    assert config.episodes == 50
+    assert config.max_steps == 220
+    assert config.feedback_schedule_mode == "elapsed_time"
+    assert config.feedback_request_policy == "one_shot_per_feedback_episode"
+    assert config.feedback_requests_per_episode == 1
+    assert config.latency_trace_mode == "precollected_uncached_per_episode_replay"
+    assert [method.name for method in configured_methods(config)] == [
+        "fixed_cbf_static_g015",
+        "paper_async_feedback_static",
+    ]
+    assert {condition["lateral_offset"] for condition in _conditions(config)} == {0.0}
+
+
+def test_paper_replication_rejects_non_manifest_episode_override():
+    manifest = PaperFidelityManifest.load("configs/paper_fidelity.json")
+    kwargs = manifest.benchmark_kwargs() | {"episodes": 49}
+
+    with pytest.raises(ValueError, match="exactly 50"):
+        PairedBenchmarkConfig(**kwargs)
+
+
+def _feedback_decision(index: int, *, cache_hit: bool = False) -> GammaDecision:
+    return GammaDecision(
+        gamma=0.05,
+        safety_level=2,
+        explanation="test",
+        model="gpt-4o",
+        provider="openai",
+        latency_seconds=2.0 + index / 1000.0,
+        requested_at_unix=1_700_000_000.0 + index,
+        prompt_hash="prompt",
+        request_hash="request",
+        raw_response=None,
+        fallback_used=False,
+        cache_hit=cache_hit,
+        error_type=None,
+    )
+
+
+def test_paper_feedback_trace_accepts_one_uncached_request_per_episode():
+    manifest = PaperFidelityManifest.load("configs/paper_fidelity.json")
+    config = PairedBenchmarkConfig(**manifest.benchmark_kwargs())
+    decisions = [_feedback_decision(index) for index in range(config.episodes)]
+
+    assert validate_feedback_decision_trace(decisions, config) == tuple(decisions)
+
+
+def test_paper_feedback_trace_rejects_single_frozen_latency_sample():
+    manifest = PaperFidelityManifest.load("configs/paper_fidelity.json")
+    config = PairedBenchmarkConfig(**manifest.benchmark_kwargs())
+    frozen = _feedback_decision(0)
+
+    with pytest.raises(ValueError, match="single frozen latency sample"):
+        validate_feedback_decision_trace([frozen] * config.episodes, config)
+
+
+def test_paper_feedback_trace_rejects_cached_request():
+    manifest = PaperFidelityManifest.load("configs/paper_fidelity.json")
+    config = PairedBenchmarkConfig(**manifest.benchmark_kwargs())
+    decisions = [_feedback_decision(index) for index in range(config.episodes)]
+    decisions[17] = _feedback_decision(17, cache_hit=True)
+
+    with pytest.raises(ValueError, match="uncached"):
+        validate_feedback_decision_trace(decisions, config)
+
+
+def test_feedback_checkpoint_resumes_only_validated_prefix(tmp_path):
+    manifest = PaperFidelityManifest.load(
+        "configs/paper_fidelity_nvidia_nim_llama31.json"
+    )
+    first = replace(_feedback_decision(0), model="meta/llama-3.1-8b-instruct", provider="nvidia-nim")
+    second = replace(_feedback_decision(1), model="meta/llama-3.1-8b-instruct", provider="nvidia-nim")
+    checkpoint = tmp_path / "feedback.json"
+    checkpoint.write_text(json.dumps([first.as_dict(), second.as_dict()]), encoding="utf-8")
+
+    resumed = load_feedback_checkpoint(
+        checkpoint, episodes=50, paper_manifest=manifest
+    )
+
+    assert resumed == [first, second]
 
 
 def test_exact_mcnemar_handles_ties_and_one_sided_discordance():
@@ -172,6 +268,36 @@ def test_development_reports_but_does_not_apply_efficacy_gate(tmp_path):
     )
     assert gate["evaluated"] is False
     assert gate["passed"] is None
+
+
+def test_paper_replication_summary_excludes_extensions_and_applies_gate(tmp_path):
+    manifest = PaperFidelityManifest.load("configs/paper_fidelity.json")
+    config = PairedBenchmarkConfig(
+        **(manifest.benchmark_kwargs() | {
+            "output_dir": str(tmp_path),
+        })
+    )
+    methods = configured_methods(config)
+    rows = []
+    for episode in range(config.episodes):
+        for method in methods:
+            rows.append(
+                _row(
+                    method,
+                    episode,
+                    method.name == "paper_async_feedback_static",
+                )
+            )
+
+    summaries = summarize_paired_rows(rows, config)
+    gate = evaluate_confirmatory_efficacy_gate(summaries, config)
+
+    assert set(summaries) == {
+        "fixed_cbf_static_g015",
+        "paper_async_feedback_static",
+    }
+    assert gate["evaluated"] is True
+    assert gate["passed"] is True
 
 
 def test_formal_contract_gate_requires_every_episode_to_be_recursive(tmp_path):

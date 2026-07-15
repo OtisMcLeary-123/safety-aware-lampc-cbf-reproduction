@@ -9,6 +9,29 @@ controllers. A delayed language response never bypasses local safety: the user
 request activates a deterministic provisional profile immediately, while the
 returned gamma is accepted only before a TTL measured from request time.
 
+## Paper one-shot interpretation
+
+The paper's feedback ablation is treated as one language request per
+feedback-enabled episode, not one provider call shared by the full experiment.
+On page 25560, the authors report 50 independent episodes, state that the
+feedback-enabled variant receives the singular message `Watch out! I think it's
+going to crash soon`, and report an average OpenAI round-trip latency of 2.4 s
+over 50 episodes. Together, these statements support 50 episode-specific
+request/latency records for the feedback condition.
+
+This is an ablation-specific inference, not a universal restriction on the
+method. Algorithm 1 checks `user_intervened` inside every control cycle, so a
+later control cycle could process another intervention. The paper does not
+publish the intervention thread, request launch timing, retry policy, or raw
+latency trace.
+
+The reproduction therefore locks `feedback_requests_per_episode=1`, requires
+50 uncached decision records with 50 distinct request timestamps, and rejects a
+single frozen record repeated across episodes. It currently pre-collects each
+uncached request and replays its measured latency at the episode's intervention
+time. This preserves a per-episode latency trace but does not reproduce a live
+request launched at the exact intervention wall-clock time.
+
 The protocol also adds a labeled `formal_extension`; it does not silently
 upgrade the paper reproduction. This profile closes four specific assumptions
 for the spherical end-effector task:
@@ -103,8 +126,8 @@ reason to spend 500 episodes.
 ## Staged decision rule
 
 1. Run unit tests and deterministic boundary/near-boundary grids.
-2. Collect live, uncached latency per episode; do not substitute a single
-   provider measurement for all conditions.
+2. Collect one live, uncached latency record per feedback episode; do not
+   substitute a single provider measurement for all conditions.
 3. Run smoke and ablation only. Inspect causal local/LLM opportunities and the
    formal contract separately from goal completion.
 4. Run development 100 only after formal, feasibility, timing, and efficacy

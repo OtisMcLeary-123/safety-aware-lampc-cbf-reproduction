@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from urllib.error import HTTPError
 
 import pytest
 
 from lampc_cbf.nvidia_nim_gamma import (
+    NVIDIA_NIM_GAMMA_OUTPUT_CONTRACT,
     NvidiaNIMGammaConfig,
     NvidiaNIMGammaMapper,
 )
@@ -44,6 +46,36 @@ def test_nim_uses_guided_json_and_validates_feedback_context(tmp_path) -> None:
     assert "current gamma=0.150000" in captured["payload"]["messages"][1]["content"]
     assert captured["authorization"] == "Bearer secret"
     assert captured["timeout"] == pytest.approx(1.5)
+
+
+def test_nim_can_use_prompt_only_json_contract_for_models_without_guidance(
+    tmp_path,
+) -> None:
+    token = tmp_path / "token.txt"
+    token.write_text("secret", encoding="utf-8")
+    captured = {}
+    mapper = NvidiaNIMGammaMapper(
+        NvidiaNIMGammaConfig(
+            token_path=str(token),
+            cache_path=None,
+            guided_json_enabled=False,
+            enable_thinking=False,
+        ),
+        transport=_transport('{"gamma_text":"0.02","safety_level":1}', captured),
+    )
+
+    decision = mapper.infer_gamma(
+        "Increase clearance now", current_gamma=0.15, feedback=True
+    )
+
+    assert not decision.fallback_used
+    assert "nvext" not in captured["payload"]
+    assert captured["payload"]["chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
+    assert NVIDIA_NIM_GAMMA_OUTPUT_CONTRACT in (
+        captured["payload"]["messages"][-1]["content"]
+    )
 
 
 def test_nim_fails_closed_on_schema_mismatch_and_does_not_cache(tmp_path) -> None:
@@ -88,3 +120,22 @@ def test_nim_success_cache_avoids_second_transport_call(tmp_path) -> None:
     assert not first.cache_hit
     assert second.cache_hit
     assert len(calls) == 1
+
+
+def test_nim_records_http_status_without_exposing_response(tmp_path) -> None:
+    token = tmp_path / "token.txt"
+    token.write_text("secret", encoding="utf-8")
+
+    def rate_limited(request, timeout):
+        del request, timeout
+        raise HTTPError("https://example.invalid", 429, "rate limited", {}, None)
+
+    mapper = NvidiaNIMGammaMapper(
+        NvidiaNIMGammaConfig(token_path=str(token), cache_path=None),
+        transport=rate_limited,
+    )
+    decision = mapper.infer_gamma("increase clearance")
+
+    assert decision.fallback_used
+    assert decision.error_type == "HTTPError:429"
+    assert decision.raw_response is None

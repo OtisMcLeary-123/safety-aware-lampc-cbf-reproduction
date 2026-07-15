@@ -10,6 +10,9 @@ from lampc_cbf.controller import (
     STATE_NAMES,
     PaperMPCConfig,
     build_mpc_controller,
+    discrete_state_transition,
+    double_integrator_dynamics_matrices,
+    dynamics_matrices,
     paper_dynamics_matrices,
 )
 
@@ -47,6 +50,51 @@ def test_paper_dynamics_update_pose_and_replace_displacement() -> None:
     assert next_state[4:] == pytest.approx(control)
 
 
+def test_double_integrator_dynamics_update_pose_and_velocity() -> None:
+    dt = 0.04
+    a, b = double_integrator_dynamics_matrices(dt)
+    state = (1.0, 2.0, 3.0, 0.2, 0.1, -0.2, 0.3, -0.4)
+    acceleration = (0.5, 0.6, -0.7, 0.8)
+
+    next_state = tuple(
+        sum(a[row][column] * state[column] for column in range(8))
+        + sum(b[row][column] * acceleration[column] for column in range(4))
+        for row in range(8)
+    )
+
+    assert next_state[:4] == pytest.approx(
+        (1.0044, 1.99248, 3.01144, 0.18464)
+    )
+    assert next_state[4:] == pytest.approx((0.12, -0.176, 0.272, -0.368))
+    assert a[4][4] == pytest.approx(1.0)
+    assert b[0][0] == pytest.approx(0.5 * dt**2)
+    assert b[4][0] == pytest.approx(dt)
+
+
+def test_discrete_state_transition_uses_double_integrator_pair() -> None:
+    state = (1.0, 2.0, 3.0, 0.2, 0.1, -0.2, 0.3, -0.4)
+    acceleration = (0.5, 0.6, -0.7, 0.8)
+    next_state = discrete_state_transition(
+        state, acceleration, dt=0.04, mode="double_integrator"
+    )
+    assert next_state[:4] == pytest.approx(
+        (1.0044, 1.99248, 3.01144, 0.18464)
+    )
+    assert next_state[4:] == pytest.approx((0.12, -0.176, 0.272, -0.368))
+    average_velocity = tuple(
+        (next_value - current_value) / 0.04
+        for current_value, next_value in zip(state[:3], next_state[:3])
+    )
+    assert average_velocity == pytest.approx((0.11, -0.188, 0.286))
+
+
+def test_dynamics_matrix_dispatch_preserves_paper_mode() -> None:
+    assert dynamics_matrices(0.04, mode="paper_state") == paper_dynamics_matrices(0.04)
+    assert dynamics_matrices(0.04, mode="double_integrator") == double_integrator_dynamics_matrices(0.04)
+    with pytest.raises(ValueError, match="mode must be"):
+        dynamics_matrices(0.04, mode="unknown")
+
+
 @pytest.mark.parametrize(
     "kwargs, message",
     [
@@ -56,6 +104,7 @@ def test_paper_dynamics_update_pose_and_replace_displacement() -> None:
         ({"velocity_regularization": -1.0}, "non-negative"),
         ({"optimal_decay_lower": 0.0}, "optimal decay bounds"),
         ({"optimal_decay_upper": 1.1}, "optimal decay bounds"),
+        ({"dynamics_mode": "unknown"}, "dynamics_mode"),
     ],
 )
 def test_invalid_configuration_is_rejected(

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "base_manifest": "paper_fidelity.json",
+  "profile": "paper_fidelity_model_substitution",
+  "language": {
+    "initial_query": "Move gripper to red cube.",
+    "feedback_query": "Watch out! I think it's going to crash soon.",
+    "required_model_family": "meta/llama-3.1-8b-instruct",
+    "required_provider": "nvidia-nim",
+    "prompt_source": "reproduction calibrated prompt",
+    "substitution_for": "gpt-4o",
+    "feedback_request_policy": "one_shot_per_feedback_episode",
+    "timeout_seconds": 30.0,
+    "max_tokens": 128,
+    "guided_json_enabled": false,
+    "enable_thinking": false
+  },
+  "benchmark": {
+    "output_dir": "artifacts/paper_feedback_50_nvidia_nim_llama31_v1",
+    "feedback_requests_per_episode": 1,
+    "latency_trace_mode": "precollected_uncached_per_episode_replay"
+  },
+  "provenance": {
+    "model_substitution": "NVIDIA NIM meta/llama-3.1-8b-instruct replaces the paper's GPT-4o/OpenAI model after the z-ai/glm-5.2 substitution timed out. Controller, scene, sample, sensing, and analysis remain inherited from paper_fidelity.json."
+  }
+}

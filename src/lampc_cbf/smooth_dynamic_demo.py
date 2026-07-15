@@ -75,10 +75,9 @@ class SmoothDynamicConfig:
     route_margin: float = 0.08
     reference_mode: str = "behind_spline"
     safety_mode: str = "cbf"
-    # ``command_velocity`` matches the closed-loop simulator interface: the
-    # command selected at this control cycle determines the position used by
-    # the one-step CBF. ``paper_state`` retains the published double-integrator
-    # transition, where p[k+1] depends on the stored velocity x[4:7].
+    # ``command_velocity`` matches the immediate Safe Panda command.
+    # ``paper_state`` retains the replacement-state transition.
+    # ``double_integrator`` uses acceleration input and exact discretization.
     cbf_transition_mode: str = "command_velocity"
     gamma_schedule: tuple[tuple[float, float], ...] = ()
     gamma_schedule_request_times: tuple[float, ...] = ()
@@ -196,9 +195,20 @@ class SmoothDynamicConfig:
             raise ValueError("avoidance_onset_threshold must be positive")
         if self.safety_mode not in {"cbf", "distance", "none"}:
             raise ValueError("safety_mode must be cbf, distance, or none")
-        if self.cbf_transition_mode not in {"paper_state", "command_velocity"}:
+        if self.cbf_transition_mode not in {
+            "paper_state",
+            "command_velocity",
+            "double_integrator",
+        }:
             raise ValueError(
-                "cbf_transition_mode must be paper_state or command_velocity"
+                "cbf_transition_mode must be paper_state, command_velocity, "
+                "or double_integrator"
+            )
+        if self.cbf_transition_mode == "double_integrator" and (
+            self.safety_reflex_enabled or self.formal_safety_filter_enabled
+        ):
+            raise ValueError(
+                "double_integrator mode requires reflex and formal filters disabled"
             )
         if not 1 <= self.requested_safety_level <= 5:
             raise ValueError("requested_safety_level must be in [1, 5]")
@@ -419,9 +429,14 @@ class ReferenceObstacleTVP:
         self.tube = tube_config or UncertaintyTubeConfig()
         self.control_time = 0.0
         self.direct_target = direct_target
-        if cbf_transition_mode not in {"paper_state", "command_velocity"}:
+        if cbf_transition_mode not in {
+            "paper_state",
+            "command_velocity",
+            "double_integrator",
+        }:
             raise ValueError(
-                "cbf_transition_mode must be paper_state or command_velocity"
+                "cbf_transition_mode must be paper_state, command_velocity, "
+                "or double_integrator"
             )
         self.cbf_transition_mode = cbf_transition_mode
         segment_lengths = np.linalg.norm(
@@ -645,12 +660,16 @@ class ReferenceObstacleTVP:
         ):
             raise RuntimeError("declare must run before configure")
         position = x[:3]
-        transition_velocity = (
-            u[:3]
-            if self.cbf_transition_mode == "command_velocity"
-            else x[4:7]
-        )
-        next_position = position + self.dt * transition_velocity
+        if self.cbf_transition_mode == "command_velocity":
+            next_position = position + self.dt * u[:3]
+        elif self.cbf_transition_mode == "double_integrator":
+            next_position = (
+                position
+                + self.dt * x[4:7]
+                + 0.5 * self.dt**2 * u[:3]
+            )
+        else:
+            next_position = position + self.dt * x[4:7]
         h_current = (
             ca.sumsqr(position - self._obstacle_tvp) - self._robust_radius_tvp**2
         )
@@ -710,7 +729,11 @@ def run_smooth_dynamic_demo(
 
     import panda_gym  # noqa: F401
 
-    from .controller import PaperMPCConfig, build_mpc_controller
+    from .controller import (
+        PaperMPCConfig,
+        build_mpc_controller,
+        discrete_state_transition,
+    )
     from .async_gamma import AtomicGammaStore, GammaUpdate, GammaUpdateQueue
     from .demo import paper_control_to_safe_panda_action
     from .formal_safety import (
@@ -827,12 +850,18 @@ def run_smooth_dynamic_demo(
             sigma=cfg.measurement_noise_sigma,
             error_bound=cfg.measurement_error_bound,
         )
+        dynamics_mode = (
+            "double_integrator"
+            if cfg.cbf_transition_mode == "double_integrator"
+            else "paper_state"
+        )
         mpc_config = PaperMPCConfig(
             linear_delta_u_weight=cfg.delta_u_weight,
             linear_jerk_weight=cfg.jerk_weight,
             optimal_decay_weight=cfg.optimal_decay_weight,
             optimal_decay_lower=cfg.optimal_decay_lower,
             target_tvp_name="reference_state",
+            dynamics_mode=dynamics_mode,
         )
         tvp = ReferenceObstacleTVP(
             reference_path,
@@ -953,6 +982,7 @@ def run_smooth_dynamic_demo(
         )
         robot_velocity_estimator.reset(start)
         observed_velocity = np.zeros(3)
+        double_integrator_velocity = np.zeros(4)
         initial_state = np.concatenate([start, [0.0], previous_control])
         if mpc_config.uses_jerk_state:
             initial_state = np.concatenate([initial_state, previous_increment])
@@ -1218,13 +1248,18 @@ def run_smooth_dynamic_demo(
                         **asdict(profile),
                     }
                 )
-            feedback_velocity = (
-                observed_velocity
-                if cfg.robot_velocity_feedback_enabled
-                else previous_control[:3]
-            )
+            if cfg.cbf_transition_mode == "double_integrator":
+                feedback_velocity = double_integrator_velocity[:3].copy()
+                feedback_yaw_velocity = float(double_integrator_velocity[3])
+            else:
+                feedback_velocity = (
+                    observed_velocity
+                    if cfg.robot_velocity_feedback_enabled
+                    else previous_control[:3]
+                )
+                feedback_yaw_velocity = float(previous_control[3])
             measured_state = np.concatenate(
-                [position, [0.0], feedback_velocity, [previous_control[3]]]
+                [position, [0.0], feedback_velocity, [feedback_yaw_velocity]]
             )
             if mpc_config.uses_jerk_state:
                 measured_state = np.concatenate([measured_state, previous_increment])
@@ -1303,7 +1338,8 @@ def run_smooth_dynamic_demo(
             reflex_intervened = False
             reflex_backup_used = False
             if (
-                (
+                cfg.cbf_transition_mode != "double_integrator"
+                and (
                     cfg.safety_reflex_enabled
                     or safety_lifecycle.requires_reflex
                     or rejected_candidate
@@ -1391,19 +1427,48 @@ def run_smooth_dynamic_demo(
             pre_step_obstacle = true_obstacle.copy()
             applied_gamma = float(tvp.gamma)
             applied_decay = float(optimal_decay_trace[-1])
-            model_velocity = feedback_velocity.copy()
+            if cfg.cbf_transition_mode == "double_integrator":
+                model_state = np.concatenate(
+                    [pre_step_position, [0.0], double_integrator_velocity]
+                )
+                predicted_state = np.asarray(
+                    discrete_state_transition(
+                        model_state,
+                        candidate,
+                        dt=mpc_config.dt,
+                        mode="double_integrator",
+                    ),
+                    dtype=float,
+                )
+                action_velocity = (
+                    predicted_state[:3] - pre_step_position
+                ) / mpc_config.dt
+                model_velocity = action_velocity.copy()
+                action_control = np.concatenate(
+                    [action_velocity, [candidate[3]]]
+                )
+            else:
+                predicted_state = None
+                model_velocity = feedback_velocity.copy()
+                action_control = candidate
             action = paper_control_to_safe_panda_action(
-                candidate, env.action_space.shape[0],
+                action_control, env.action_space.shape[0],
                 linear_input_limit=(
                     cfg.formal_filter_speed_limit
                     if formal_filter is not None
-                    else mpc_config.linear_input_limit
+                    else (
+                        cfg.robot_velocity_maximum
+                        if cfg.cbf_transition_mode == "double_integrator"
+                        else mpc_config.linear_input_limit
+                    )
                 ),
                 dt=mpc_config.dt,
             )
             observation, _, terminated, truncated, _ = env.step(action)
             previous_increment = candidate - previous_control
             previous_control = candidate
+            if predicted_state is not None:
+                double_integrator_velocity = predicted_state[4:8].copy()
 
             true_obstacle = true_obstacle + obstacle_velocity * mpc_config.dt
             env.sim.set_base_pose("unsafe_region_1", true_obstacle, quaternion)
@@ -1417,7 +1482,7 @@ def run_smooth_dynamic_demo(
                 pre_step_position,
                 position,
                 model_velocity,
-                candidate[:3],
+                action_control[:3],
                 mpc_config.dt,
             )
             model_transition_errors.append(calibration.model_transition_error)
@@ -1479,7 +1544,8 @@ def run_smooth_dynamic_demo(
                     "estimated_obstacle_velocity": estimated_velocity.tolist(),
                     "hazard_clear_elapsed": hazard_clear_elapsed,
                     "observed_velocity": observed_velocity.tolist(),
-                    "commanded_velocity": candidate[:3].tolist(),
+                    "commanded_velocity": action_control[:3].tolist(),
+                    "mpc_input": candidate[:4].tolist(),
                     "true_barrier": next_true_barrier,
                     "true_cbf_residual": (
                         true_cbf_residual if cfg.safety_mode == "cbf" else None

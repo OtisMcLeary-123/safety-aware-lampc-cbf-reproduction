@@ -1,0 +1,32 @@
+{
+  "profile": "safe_panda_8d_double_integrator_scenario_extension",
+  "goal_contract": "ee_reach_only",
+  "cbf_transition_mode": "double_integrator",
+  "episodes_per_method": 50,
+  "rows": 100,
+  "solver_failure_outcomes": 0,
+  "methods": {
+    "safe_panda_8d_fixed_g015": {
+      "successes": 13,
+      "collisions": 37,
+      "solver_failures": 63
+    },
+    "safe_panda_8d_async_feedback": {
+      "successes": 13,
+      "collisions": 37,
+      "solver_failures": 240
+    }
+  },
+  "paired_success_difference": 0.0,
+  "mcnemar_exact_p": 1.0,
+  "bootstrap_resamples": 10000,
+  "fidelity": "not exact Table-4; Safe Panda 8D double-integrator extension",
+  "transition_error_m": {
+    "max_over_episodes": 0.0006815687883233993,
+    "mean_over_episodes": 0.00038004954937787406
+  },
+  "action_tracking_error_m": {
+    "max_over_episodes": 0.0006815687883233993,
+    "mean_over_episodes": 0.00038004954937787406
+  }
+}

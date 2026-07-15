@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "profile": "paper_fidelity",
+  "source": {
+    "title": "Safety-Aware Optimal Control With Language-Guided Online Parameter Adjustment via Large Language Models",
+    "doi": "10.1109/ACCESS.2026.3664145",
+    "pages": "25551-25563"
+  },
+  "controller": {
+    "dt_seconds": 0.04,
+    "horizon": 15,
+    "state_order": ["x", "y", "z", "psi", "dx", "dy", "dz", "dpsi"],
+    "input_order": ["u_x", "u_y", "u_z", "u_psi"],
+    "state_weight": 1.0,
+    "linear_delta_u_weight": 0.5,
+    "yaw_delta_u_weight": 0.00001,
+    "velocity_regularization_weight": 0.1,
+    "yaw_regularization_weight": 0.00005,
+    "position_lower_m": [-3.0, -3.0, 0.0],
+    "yaw_bound_pi_multiplier": 0.55,
+    "linear_input_limit": 0.2,
+    "yaw_input_limit_pi_multiplier": 1.0,
+    "initial_gamma": 0.15,
+    "prediction_mode": "static",
+    "reference_mode": "direct_target",
+    "cbf_transition_mode": "paper_state",
+    "safety_reflex_enabled": false,
+    "optimal_decay_weight": 0.0
+  },
+  "sensing": {
+    "period_seconds": 0.67,
+    "measurement_noise_mode": "gaussian",
+    "measurement_noise_sigma_m": 0.005,
+    "obstacle_motion_in_horizon": "static"
+  },
+  "scene": {
+    "goal_offset_m": [0.0, 0.3, 0.0],
+    "obstacle_start_forward_offset_m": 0.44,
+    "obstacle_start_vertical_offset_m": 0.0,
+    "obstacle_radius_m": 0.1,
+    "gripper_collision_radius_m": 0.035
+  },
+  "solver_policy": {
+    "maximum_constraint_violation": 0.000001,
+    "maximum_cpu_time_seconds": 0.035,
+    "control_deadline_seconds": 0.04,
+    "reject_deadline_miss": false
+  },
+  "language": {
+    "initial_query": "Move gripper to red cube.",
+    "feedback_query": "Watch out! I think it's going to crash soon.",
+    "required_model_family": "gpt-4o",
+    "required_provider": "openai",
+    "prompt_source": "unpublished",
+    "feedback_request_policy": "one_shot_per_feedback_episode"
+  },
+  "benchmark": {
+    "stage": "paper-replication",
+    "episodes": 50,
+    "seed": 20260713,
+    "bootstrap_resamples": 10000,
+    "max_steps": 220,
+    "obstacle_speed_lower_mps": 0.025,
+    "obstacle_speed_upper_mps": 0.2,
+    "fixed_lateral_offset_m": 0.0,
+    "intervention_time_lower_s": 0.0,
+    "intervention_time_upper_s": 0.4,
+    "feedback_schedule_mode": "elapsed_time",
+    "feedback_requests_per_episode": 1,
+    "latency_trace_mode": "precollected_uncached_per_episode_replay",
+    "gamma_update_ttl_seconds": 8.8,
+    "reference_speed_mps": 0.08,
+    "method_names": [
+      "fixed_cbf_static_g015",
+      "paper_async_feedback_static"
+    ],
+    "output_dir": "artifacts/paper_feedback_50_v1"
+  },
+  "extensions": {
+    "velocity_prediction": false,
+    "uncertainty_tube": false,
+    "safety_reflex": false,
+    "optimal_decay": false,
+    "formal_final_filter": false,
+    "liveness_policy_library": false
+  },
+  "provenance": {
+    "reported": [
+      "controller.dt_seconds",
+      "controller.horizon",
+      "controller.state_order",
+      "controller.input_order",
+      "controller.state_weight",
+      "controller.linear_delta_u_weight",
+      "controller.yaw_delta_u_weight",
+      "controller.velocity_regularization_weight",
+      "controller.yaw_regularization_weight",
+      "controller.position_lower_m",
+      "controller.yaw_bound_pi_multiplier",
+      "controller.linear_input_limit",
+      "controller.yaw_input_limit_pi_multiplier",
+      "controller.prediction_mode",
+      "sensing.period_seconds",
+      "sensing.measurement_noise_mode",
+      "sensing.measurement_noise_sigma_m",
+      "benchmark.episodes",
+      "benchmark.bootstrap_resamples",
+      "benchmark.obstacle_speed_lower_mps",
+      "benchmark.obstacle_speed_upper_mps"
+    ],
+    "reconstruction_assumptions": {
+      "controller.initial_gamma": "The current fixed baseline uses the experimental upper bound; the paper does not publish the raw initial OF response for the ablation query.",
+      "controller.reference_mode": "Direct targeting reconstructs the paper task; the exact reference generator is unpublished.",
+      "controller.cbf_transition_mode": "Uses the published state transition in Equations (17)-(18).",
+      "benchmark.seed": "The paper does not publish random seeds.",
+      "benchmark.max_steps": "Physics-derived 220-step completion budget; the paper does not publish an episode timeout.",
+      "benchmark.fixed_lateral_offset_m": "Head-on reconstruction; the paper does not publish the obstacle's lateral offset.",
+      "benchmark.intervention_time_lower_s": "Frozen reconstruction interval; the paper states random timing but not its distribution.",
+      "benchmark.intervention_time_upper_s": "Frozen reconstruction interval; the paper states random timing but not its distribution.",
+      "benchmark.feedback_schedule_mode": "Elapsed-time scheduling implements the paper's random on-demand intervention; the exact author mechanism is unpublished.",
+      "language.feedback_request_policy": "The ablation describes 50 independent episodes, gives one singular feedback utterance for the feedback-enabled variant, and averages OpenAI round-trip latency over 50 episodes. We therefore infer one feedback request per feedback-enabled episode; Algorithm 1 does not impose a universal one-intervention limit.",
+      "benchmark.latency_trace_mode": "The ablation evidence supports a separate request record per feedback episode, but does not disclose threading. This implementation pre-collects one uncached request per condition and replays its latency rather than launching it at the intervention wall-clock time.",
+      "benchmark.gamma_update_ttl_seconds": "Set to the 220-step episode duration so an arrived paper-style response is not rejected by an unpublished one-second TTL.",
+      "benchmark.reference_speed_mps": "Reconstruction value; the paper does not publish gripper reference speed.",
+      "scene": "All numeric scene geometry and relative poses are reconstruction values because the paper does not publish them.",
+      "solver_policy": "Fail-closed implementation policy; the paper names IPOPT but does not publish acceptance tolerances or deadline handling.",
+      "language.prompt_source": "The paper reports GPT-4o and the two ablation utterances but does not publish TP/OF system prompts or the exact model snapshot."
+    }
+  }
+}

@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from time import perf_counter, time
 from typing import Any, Callable
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .hf_llm import (
@@ -22,6 +23,12 @@ from .hf_llm import (
 
 NVIDIA_NIM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_NVIDIA_NIM_MODEL = "meta/llama-3.1-8b-instruct"
+NVIDIA_NIM_GAMMA_OUTPUT_CONTRACT = (
+    'Return exactly one JSON object shaped as {"gamma_text":"0.02",'
+    '"safety_level":1}. gamma_text must be one of "0.02", "0.05", "0.08", '
+    '"0.11", or "0.15" and safety_level must be the matching integer 1-5. '
+    "Do not include markdown, analysis, reasoning tags, or additional keys."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +42,8 @@ class NvidiaNIMGammaConfig:
     seed: int = 11
     max_tokens: int = 64
     cache_path: str | None = "results/nvidia_nim_gamma_cache.jsonl"
+    guided_json_enabled: bool = True
+    enable_thinking: bool = False
 
     def __post_init__(self) -> None:
         if not self.model:
@@ -95,6 +104,14 @@ class NvidiaNIMGammaMapper:
         messages = HuggingFaceGammaMapper._messages(
             instruction, current_gamma, feedback
         )
+        if not self.config.guided_json_enabled:
+            messages[-1] = {
+                **messages[-1],
+                "content": (
+                    f"{NVIDIA_NIM_GAMMA_OUTPUT_CONTRACT}\n"
+                    f"{messages[-1]['content']}"
+                ),
+            }
         schema = GAMMA_SCHEMA["json_schema"]["schema"]
         payload = {
             "model": self.config.model,
@@ -103,8 +120,13 @@ class NvidiaNIMGammaMapper:
             "max_tokens": self.config.max_tokens,
             "seed": self.config.seed,
             "stream": False,
-            "nvext": {"guided_json": schema},
         }
+        if self.config.guided_json_enabled:
+            payload["nvext"] = {"guided_json": schema}
+        else:
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": self.config.enable_thinking
+            }
         request_hash = sha256(
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
@@ -157,6 +179,9 @@ class NvidiaNIMGammaMapper:
                 error_type=None,
             )
         except Exception as error:  # external inference must fail closed
+            error_type = type(error).__name__
+            if isinstance(error, HTTPError):
+                error_type = f"HTTPError:{error.code}"
             decision = GammaDecision(
                 gamma=self.config.fallback_gamma,
                 safety_level=2,
@@ -170,7 +195,7 @@ class NvidiaNIMGammaMapper:
                 raw_response=raw_response,
                 fallback_used=True,
                 cache_hit=False,
-                error_type=type(error).__name__,
+                error_type=error_type,
             )
         self._append_cache(decision)
         return decision
