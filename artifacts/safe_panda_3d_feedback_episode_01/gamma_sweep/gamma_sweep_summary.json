@@ -1,0 +1,60 @@
+{
+  "episode_id": 1,
+  "profile": "safe_panda_3d_avoidance_50_extension",
+  "runs": [
+    {
+      "label": "gamma=0.001",
+      "gamma": 0.001,
+      "outcome": "safety_timeout",
+      "success": false,
+      "collision": false,
+      "steps": 260,
+      "minimum_true_clearance_m": 0.08258106259445569
+    },
+    {
+      "label": "gamma=0.040",
+      "gamma": 0.04,
+      "outcome": "goal",
+      "success": true,
+      "collision": false,
+      "steps": 235,
+      "minimum_true_clearance_m": 0.01272780306512758
+    },
+    {
+      "label": "gamma=0.065",
+      "gamma": 0.065,
+      "outcome": "goal",
+      "success": true,
+      "collision": false,
+      "steps": 233,
+      "minimum_true_clearance_m": 0.0036455686056672265
+    },
+    {
+      "label": "gamma=0.100",
+      "gamma": 0.1,
+      "outcome": "goal",
+      "success": true,
+      "collision": false,
+      "steps": 226,
+      "minimum_true_clearance_m": 0.0007548371175158664
+    },
+    {
+      "label": "gamma=0.150",
+      "gamma": 0.15,
+      "outcome": "collision",
+      "success": false,
+      "collision": true,
+      "steps": 142,
+      "minimum_true_clearance_m": -0.00022624087096834167
+    },
+    {
+      "label": "baseline",
+      "gamma": null,
+      "outcome": "collision",
+      "success": false,
+      "collision": true,
+      "steps": 74,
+      "minimum_true_clearance_m": -0.0005796800883975106
+    }
+  ]
+}

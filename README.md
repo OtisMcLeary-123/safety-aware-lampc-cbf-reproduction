@@ -12,30 +12,27 @@ MPC-CBF manipulation using Safe Panda Gym, do-mpc, CasADi, and IPOPT.
 > This repository is not an exact Table-4 reproduction, a physical-robot
 > result, or a whole-arm safety certificate.
 
-## 3-D Async-Feedback Showcase
+## 3-D Gamma Sweep Showcase
 
-This replay uses successful async-feedback episode 1 from the 50-case 3-D
-provider benchmark. The provider selected `gamma=0.03`; the controller reached
-the goal without collision while avoiding a moving obstacle in `x`, `y`, and
-`z`.
+Episode 1 was replayed with five fixed CBF decay values and a nominal
+direct-target baseline without CBF. Every run uses the same initial state,
+moving obstacle, 3-D waypoint reference, seed, and controller profile.
 
-![Safe Panda 3-D async-feedback motion](artifacts/safe_panda_3d_feedback_episode_01/robot_motion.gif)
+![Safe Panda 3-D gamma sweep](artifacts/safe_panda_3d_feedback_episode_01/gamma_sweep/trajectory_gamma_sweep.png)
 
-![Safe Panda 3-D trajectory and clearance comparison](artifacts/safe_panda_3d_feedback_episode_01/trajectory_3d_comparison.png)
+| Method | Outcome | Steps | Minimum true clearance |
+|---|---|---:|---:|
+| `gamma=0.001` | Safety timeout | 260 | 82.58 mm |
+| `gamma=0.040` | Goal | 235 | 12.73 mm |
+| `gamma=0.065` | Goal | 233 | 3.65 mm |
+| `gamma=0.100` | Goal | 226 | 0.75 mm |
+| `gamma=0.150` | Collision | 142 | -0.23 mm |
+| Baseline: direct target, no CBF | Collision | 74 | -0.58 mm |
 
-| Episode metric | Value |
-|---|---:|
-| Outcome | Goal |
-| Collision | No |
-| Feedback gamma | `0.03` |
-| Provider latency | `0.548 s` |
-| Minimum true clearance | `22.87 mm` |
-| Raw `x` range | `-0.0049..0.1380 m` |
-| Raw `z` range | `0.1990..0.3147 m` |
-
-The raw trajectory, reference, obstacle trace, solver diagnostics, and complete
-episode summary are stored in
-`artifacts/safe_panda_3d_feedback_episode_01/`.
+The sweep illustrates the safety-efficiency tradeoff: very small gamma avoids
+the obstacle early but can time out, intermediate values reach the goal, and
+the least cautious value collides in this scenario. The baseline is a custom
+nominal comparator, not the paper's LaMPC-ED implementation.
 
 ## Main Features
 
@@ -140,6 +137,17 @@ PYTHONPATH=src python scripts/render_safe_panda_3d_feedback_episode.py \
   --episode-id 1 \
   --output-dir artifacts/safe_panda_3d_feedback_episode_01
 ```
+
+To reproduce the five-gamma plus baseline Figure-5-style sweep:
+
+```bash
+PYTHONPATH=src python scripts/render_safe_panda_3d_gamma_sweep.py \
+  --episode-id 1 \
+  --output-dir artifacts/safe_panda_3d_feedback_episode_01/gamma_sweep
+```
+
+The sweep writes `trajectory_gamma_sweep.png`,
+`gamma_sweep_summary.csv`, and `gamma_sweep_summary.json`.
 
 Provider decisions are model-substitution evidence (`meta/llama-3.1-8b-instruct`),
 not GPT-4o/OpenAI evidence. Raw checkpoints and credentials remain local.

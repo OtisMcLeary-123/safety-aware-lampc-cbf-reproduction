@@ -63,6 +63,24 @@ Async-feedback episode 1 was replayed with plots and animation enabled:
 Generated GIF, PNG, CSV, metrics, and raw provider checkpoints remain local and
 are excluded from commits under the repository artifact/credential policy.
 
+## Episode-1 Gamma Sweep
+
+The same 3-D episode was run with five fixed gamma values and a direct-target
+baseline without CBF:
+
+| Method | Outcome | Steps | Minimum true clearance |
+|---|---|---:|---:|
+| `gamma=0.001` | Safety timeout | 260 | 0.08258 m |
+| `gamma=0.040` | Goal | 235 | 0.01273 m |
+| `gamma=0.065` | Goal | 233 | 0.00365 m |
+| `gamma=0.100` | Goal | 226 | 0.00075 m |
+| `gamma=0.150` | Collision | 142 | -0.00023 m |
+| Baseline: direct target, no CBF | Collision | 74 | -0.00058 m |
+
+This single-scenario sweep demonstrates a safety-efficiency tradeoff, not a
+population-level gamma ranking. The baseline is a local nominal comparator and
+must not be labeled as the paper's LaMPC-ED method.
+
 ## Reproduction Commands
 
 ```bash
