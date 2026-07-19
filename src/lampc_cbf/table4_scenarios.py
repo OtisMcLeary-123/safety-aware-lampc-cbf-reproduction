@@ -28,9 +28,9 @@ CATEGORY_COUNTS = {
 CONTROL_PERIOD_SECONDS = 0.04
 SENSOR_PERIOD_SECONDS = 0.67
 MAX_EE_SPEED_MPS = 0.20
-EE_COLLISION_RADIUS_M = 0.035
-MIN_OBSTACLE_SPEED_MPS = 0.025
-MAX_OBSTACLE_SPEED_MPS = 0.20
+EE_COLLISION_RADIUS_M = 0.05
+MIN_OBSTACLE_SPEED_MPS = 0.0125
+MAX_OBSTACLE_SPEED_MPS = 0.10
 
 
 def _vector(value: object, name: str) -> tuple[float, float, float]:
@@ -143,7 +143,7 @@ def _validate_category_rules(scenarios: Sequence[Table4Scenario]) -> None:
 
     boundary = by_category["Boundary & Kinematic Limits"]
     for index, scenario in enumerate(boundary):
-        expected_speed = 0.18 + index * 0.02 / 9.0
+        expected_speed = 0.09 + index * 0.01 / 9.0
         expected_time = 0.35 + index * 0.05 / 9.0
         x, y, z = scenario.obstacle_start_pos
         if not 0.03 <= abs(x) <= EE_COLLISION_RADIUS_M or y != 0.36 or z != 0.0:

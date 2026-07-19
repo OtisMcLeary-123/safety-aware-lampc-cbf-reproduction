@@ -23,7 +23,7 @@
     "obstacle_height_offset_m": 0.06,
     "obstacle_vertical_velocity_mps": -0.015,
     "obstacle_radius_m": 0.10,
-    "ee_collision_radius_m": 0.035
+    "ee_collision_radius_m": 0.05
   },
   "benchmark": {
     "episodes": 50,

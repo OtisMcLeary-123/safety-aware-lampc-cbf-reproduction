@@ -40,7 +40,7 @@
   },
   "scene": {
     "obstacle_radius_m": 0.0,
-    "ee_collision_radius_m": 0.035,
+    "ee_collision_radius_m": 0.05,
     "obstacle_geometry_status": "candidate_point_obstacle_extension"
   },
   "benchmark": {

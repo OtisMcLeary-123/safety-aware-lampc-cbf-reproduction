@@ -31,8 +31,8 @@ def test_candidate_suite_has_exact_fifty_validated_scenarios() -> None:
 
 def test_candidate_suite_preserves_requested_noise_and_speed_sweeps() -> None:
     scenarios = load_scenarios(SCENARIO_PATH)
-    assert scenarios[0].speed_mps == pytest.approx(0.025)
-    assert scenarios[14].speed_mps == pytest.approx(0.20)
+    assert scenarios[0].speed_mps == pytest.approx(0.0125)
+    assert scenarios[14].speed_mps == pytest.approx(0.10)
     assert scenarios[30].intervention_time == pytest.approx(0.35)
     assert scenarios[39].intervention_time == pytest.approx(0.40)
     assert scenarios[40].noise_sigma == pytest.approx(0.01)
