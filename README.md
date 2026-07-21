@@ -25,19 +25,49 @@ solver diagnostics, environment adapter, and experiment orchestration.
 
 ## Results
 
-The primary committed result is the Safe Panda 8-state engineering extension:
+The primary committed result is the frozen 150-episode core benchmark
+(three encounter families x 50 episodes, SHA-pinned instances, paired
+designs; joint success = collision-free goal):
 
-| Method | Success | Collisions | Solver-failure steps |
-|---|---:|---:|---:|
-| Fixed `gamma=0.15` | 13/50 | 37/50 | 63 |
-| Contextual feedback | 13/50 | 37/50 | 240 |
+| Arm | Success | Collisions |
+|---|---:|---:|
+| Fixed hard-constraint baseline (static horizon) | 24/150 | 126 |
+| + scripted gamma feedback | 24/150 | 126 |
+| Velocity-tube prediction | 69/150 | 24 |
+| + NIM gamma feedback (hard constraint) | 48/150 | 77 |
+| Soft slack (L1 exact penalty, tube base) | 63/150 | 0 |
+| + NIM gamma feedback (slack base) | 66/150 | 0 |
+| Scripted prediction-channel feedback | 58/150 | 35 |
+| Worst-case dead-time margin | 5/150 | 20 |
 
-The paired success difference is `0.0` with exact McNemar `p=1.0`; this profile
-does not show an efficacy improvement from feedback.
+Scripted gamma feedback on the hard-constraint baseline changes no
+outcome (150/150 concordant pairs); the same feedback on the tube base
+is harmful (69 -> 48, collisions 24 -> 77, rejected-solve freeze); on
+the slack base it is beneficial and confirmed by a preregistered
+head-on experiment on 120 new instances: fixed `17/120` vs feedback
+`30/120`, exact McNemar `p = 0.00098`, effect `+0.108`
+(95% CI `[0.050, 0.167]`), zero collisions in all 240 episodes. The
+sign of the feedback effect is decided by how the solver handles
+infeasibility. See
+[the 150-episode result](docs/SAFE_PANDA_CORE_SCENARIOS_150_RESULT.md).
 
-The separate 3-D provider extension reaches `23/50` successes versus `19/50`
-for the fixed baseline, with McNemar `p=0.125`. It is an engineering extension,
-not evidence for the paper's GPT-4o/OpenAI claim. See
+The language-mapping stage has been probed with real GPT-4o
+(`gpt-4o-2024-11-20` via GitHub Models) on the paper's eight published
+calibration queries: blinded zero-shot prompting anti-correlates with
+the printed mapping (Spearman `rho = -0.51`), few-shot prompting
+recovers it (`rho = 0.95` with three constructed anchors; `rho = 1.00`,
+8/8 labels, on leave-one-out replay of the published pairs), and a
+paraphrase probe finds the mapped safety class phrasing-robust while
+the continuous gamma is not (`0.01`-`0.05` across paraphrases of the
+same warning). See
+[the GPT-4o alignment probe](docs/GPT4O_ALIGNMENT_PROBE.md). The
+benchmark's feedback decisions remain NIM llama-3.1-8b-instruct
+checkpoint replays.
+
+Earlier engineering extensions: the Safe Panda 8-state profile shows no
+feedback effect (13/50 vs 13/50, McNemar `p=1.0`); the 3-D provider
+extension reaches `23/50` vs `19/50` (McNemar `p=0.125`) and is not
+evidence for the paper's GPT-4o/OpenAI success-rate claim. See
 [the detailed 3-D result](docs/SAFE_PANDA_3D_PROVIDER_50_RESULT.md).
 
 ### Gamma-sweep illustration (head-on encounter, frozen instance CS1-E00)
@@ -62,6 +92,22 @@ not a population-level ranking — see
 | `gamma=1.000` | Safety timeout | 260 | 41.9 mm |
 | feedback `0.15→0.05` | **Goal** | 247 | 79.2 mm |
 
+### Feedback-arm episode render (orthogonal crossing, frozen instance CS2-E37)
+
+One frozen crossing episode replayed under the NIM + soft-slack feedback
+arm (gamma `0.15 -> 0.05` at the frozen intervention time, cached
+provider decision, L1 slack valve on the velocity-tube base). The arm
+ends the episode as a collision-free safety timeout: the end-effector
+yields to the crossing obstacle and holds clearance (minimum `83.2 mm`
+over 260 steps) instead of forcing the goal. The replay reproduces the
+committed benchmark row exactly, and the animation draws the obstacle
+at its true instance radius
+(`scripts/render_nim_slack_episode.py --obstacle-scale 1.0`).
+
+![CS2-E37 robot motion](docs/assets/nim_slack_cs2e37_motion.gif)
+
+![CS2-E37 trajectory and clearance](docs/assets/nim_slack_cs2e37_safety.png)
+
 #### Legacy single-episode sweep (side-crossing, historical profile)
 
 ![Safe Panda 3-D gamma sweep](docs/assets/trajectory_gamma_sweep.png)
@@ -80,7 +126,7 @@ experiments. Saved local checkpoints can be replayed without provider access.
 
 ## Quickstart
 
-Run the complete local test suite:
+Run the complete local test suite (currently `351 passed, 2 skipped`):
 
 ```bash
 python -m pytest -q
