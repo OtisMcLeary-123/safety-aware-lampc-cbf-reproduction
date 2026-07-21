@@ -70,48 +70,45 @@ extension reaches `23/50` vs `19/50` (McNemar `p=0.125`) and is not
 evidence for the paper's GPT-4o/OpenAI success-rate claim. See
 [the detailed 3-D result](docs/SAFE_PANDA_3D_PROVIDER_50_RESULT.md).
 
-### Gamma-sweep illustration (head-on encounter, frozen instance CS1-E00)
+### Gamma-sweep illustration (head-on encounter, frozen instance CS1-E11)
 
 One head-on episode from the frozen core benchmark, run under five fixed
 gamma values plus the checkpointed language-feedback protocol, all on the
-velocity-tube + soft-slack profile. Smaller gamma buys a visibly wider
-avoidance arc and larger clearance; every fixed gamma still times out on
-this instance, while the feedback run (gamma 0.15 to 0.05 at the frozen
-intervention time) is the only one that reaches the goal. Illustrative,
-not a population-level ranking — see
+velocity-tube + soft-slack profile. On this instance every run —
+including feedback — ends as a collision-free safety timeout: with the
+obstacle riding the goal axis, the safe set along the direct route stays
+empty. What gamma buys is clearance: smaller gamma deviates earlier and
+holds a visibly wider margin, and the feedback run (gamma 0.15 to 0.05
+at the frozen intervention time) recovers clearance over fixed 0.15
+(73.6 mm to 84.3 mm). Illustrative, not a population-level ranking — see
 [the 150-episode result](docs/SAFE_PANDA_CORE_SCENARIOS_150_RESULT.md).
 
-![Gamma sweep on a head-on encounter](docs/assets/gamma_sweep_cs1_headon.png)
+![Gamma sweep on a head-on encounter](docs/assets/gamma_sweep_cs1e11.png)
 
 | Run | Outcome | Steps | Minimum true clearance |
 |---|---|---:|---:|
-| `gamma=0.001` | Safety timeout | 260 | 193.4 mm |
-| `gamma=0.040` | Safety timeout | 260 | 83.0 mm |
-| `gamma=0.065` | Safety timeout | 260 | 67.5 mm |
-| `gamma=0.150` | Safety timeout | 260 | 51.7 mm |
-| `gamma=1.000` | Safety timeout | 260 | 41.9 mm |
-| feedback `0.15→0.05` | **Goal** | 247 | 79.2 mm |
+| `gamma=0.001` | Safety timeout | 260 | 217.4 mm |
+| `gamma=0.040` | Safety timeout | 260 | 88.8 mm |
+| `gamma=0.065` | Safety timeout | 260 | 76.6 mm |
+| `gamma=0.150` | Safety timeout | 260 | 73.6 mm |
+| `gamma=1.000` | Safety timeout | 260 | 61.3 mm |
+| feedback `0.15→0.05` | Safety timeout | 260 | 84.3 mm |
 
-### Feedback-arm episode render (orthogonal crossing, frozen instance CS2-E37)
+### Feedback-arm episode render (head-on closure, frozen instance CS1-E11)
 
-One frozen crossing episode replayed under the NIM + soft-slack feedback
-arm (gamma `0.15 -> 0.05` at the frozen intervention time, cached
-provider decision, L1 slack valve on the velocity-tube base). The arm
-ends the episode as a collision-free safety timeout: the end-effector
-yields to the crossing obstacle and holds clearance (minimum `83.2 mm`
-over 260 steps) instead of forcing the goal. The replay reproduces the
-committed benchmark row exactly, and the animation draws the obstacle
-at its true instance radius
+The same frozen head-on episode replayed under the NIM + soft-slack
+feedback arm (gamma `0.15 -> 0.05` at the frozen intervention time,
+cached provider decision, L1 slack valve on the velocity-tube base).
+The arm ends the episode as a collision-free safety timeout: the
+end-effector yields to the closing obstacle and holds clearance
+(minimum `84.3 mm` over 260 steps) instead of forcing the goal. The
+replay reproduces the committed benchmark row exactly, and the
+animation draws the obstacle at its true instance radius
 (`scripts/render_nim_slack_episode.py --obstacle-scale 1.0`).
 
-![CS2-E37 robot motion](docs/assets/nim_slack_cs2e37_motion.gif)
+![CS1-E11 robot motion](docs/assets/nim_slack_cs1e11_motion.gif)
 
-![CS2-E37 trajectory and clearance](docs/assets/nim_slack_cs2e37_safety.png)
-
-#### Legacy single-episode sweep (side-crossing, historical profile)
-
-![Safe Panda 3-D gamma sweep](docs/assets/trajectory_gamma_sweep.png)
-| Direct-target baseline, no CBF | Collision | 74 | -0.58 mm |
+![CS1-E11 trajectory and clearance](docs/assets/nim_slack_cs1e11_safety.png)
 
 ## Installation
 
