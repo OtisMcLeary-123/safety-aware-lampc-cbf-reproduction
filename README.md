@@ -70,41 +70,49 @@ extension reaches `23/50` vs `19/50` (McNemar `p=0.125`) and is not
 evidence for the paper's GPT-4o/OpenAI success-rate claim. See
 [the detailed 3-D result](docs/SAFE_PANDA_3D_PROVIDER_50_RESULT.md).
 
-### Gamma-sweep illustration (head-on encounter, frozen instance CS1-E11)
+### Gamma-sweep illustration (head-on encounter, instance CS1-E11)
 
 One head-on episode from the frozen core benchmark, run under five fixed
 gamma values plus the checkpointed language-feedback protocol, all on the
-velocity-tube + soft-slack profile. On this instance every run —
-including feedback — ends as a collision-free safety timeout: with the
-obstacle riding the goal axis, the safe set along the direct route stays
-empty. What gamma buys is clearance: smaller gamma deviates earlier and
-holds a visibly wider margin, and the feedback run (gamma 0.15 to 0.05
-at the frozen intervention time) recovers clearance over fixed 0.15
-(73.6 mm to 84.3 mm). Illustrative, not a population-level ranking — see
+velocity-tube + soft-slack profile. The illustration profile stretches
+the instance's start-to-goal offset by 1.3x and raises the step cap from
+the frozen 260 to 520, so each run has room to trace its full horseshoe
+avoidance arc around the crossing obstacle (drawn to scale as translucent
+spheres, opacity fading into the past, per the source paper's Fig.-5
+style). Under the frozen contract this instance ends as a collision-free
+safety timeout for every arm; with the extended profile every run reaches
+the goal, and the trade stays visible: smaller gamma deviates earlier and
+holds a wider margin, while the feedback run (gamma 0.15 to 0.05 at the
+frozen intervention time) is both the fastest to the goal and clears the
+obstacle more widely than fixed 0.15 (84.2 mm vs 65.1 mm). Illustrative,
+not a population-level ranking — see
 [the 150-episode result](docs/SAFE_PANDA_CORE_SCENARIOS_150_RESULT.md).
 
 ![Gamma sweep on a head-on encounter](docs/assets/gamma_sweep_cs1e11.png)
 
 | Run | Outcome | Steps | Minimum true clearance |
 |---|---|---:|---:|
-| `gamma=0.001` | Safety timeout | 260 | 217.4 mm |
-| `gamma=0.040` | Safety timeout | 260 | 88.8 mm |
-| `gamma=0.065` | Safety timeout | 260 | 76.6 mm |
-| `gamma=0.150` | Safety timeout | 260 | 73.6 mm |
-| `gamma=1.000` | Safety timeout | 260 | 61.3 mm |
-| feedback `0.15→0.05` | Safety timeout | 260 | 84.3 mm |
+| `gamma=0.001` | Goal | 337 | 217.9 mm |
+| `gamma=0.040` | Goal | 339 | 89.6 mm |
+| `gamma=0.065` | Goal | 325 | 77.8 mm |
+| `gamma=0.150` | Goal | 299 | 65.1 mm |
+| `gamma=1.000` | Goal | 296 | 56.3 mm |
+| feedback `0.15→0.05` | **Goal** | **292** | **84.2 mm** |
 
-### Feedback-arm episode render (head-on closure, frozen instance CS1-E11)
+### Feedback-arm episode render (head-on closure, instance CS1-E11)
 
-The same frozen head-on episode replayed under the NIM + soft-slack
-feedback arm (gamma `0.15 -> 0.05` at the frozen intervention time,
-cached provider decision, L1 slack valve on the velocity-tube base).
-The arm ends the episode as a collision-free safety timeout: the
-end-effector yields to the closing obstacle and holds clearance
-(minimum `84.3 mm` over 260 steps) instead of forcing the goal. The
-replay reproduces the committed benchmark row exactly, and the
-animation draws the obstacle at its true instance radius
-(`scripts/render_nim_slack_episode.py --obstacle-scale 1.0`).
+The same episode replayed under the NIM + soft-slack feedback arm
+(gamma `0.15 -> 0.05` at the frozen intervention time, cached provider
+decision, L1 slack valve on the velocity-tube base), on the same
+illustration profile (1.3x goal offset, 520-step cap, true obstacle
+radius). The end-effector loops backward into the horseshoe as the
+obstacle closes, lets it pass, then swings around to the goal in 292
+steps with a minimum clearance of `84.2 mm` — no collision. Reproduce
+with
+`scripts/render_nim_slack_episode.py CS1-E11 --obstacle-scale 1.0
+--max-steps 520 --goal-scale 1.3`; under the frozen benchmark contract
+(260-step cap, unstretched goal) the same episode is a collision-free
+safety timeout, as recorded in the committed benchmark row.
 
 ![CS1-E11 robot motion](docs/assets/nim_slack_cs1e11_motion.gif)
 

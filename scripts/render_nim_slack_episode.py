@@ -29,6 +29,22 @@ def main() -> None:
     parser.add_argument("episode_ids", nargs="+", help="e.g. CS2-E09 CS1-E11")
     parser.add_argument("--output-root", default="artifacts")
     parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="override the frozen step cap (e.g. 520 for an extended-horizon "
+        "illustration). Values other than the frozen 260 deviate from the "
+        "benchmark contract and are exploratory renders, not benchmark rows.",
+    )
+    parser.add_argument(
+        "--goal-scale",
+        type=float,
+        default=1.0,
+        help="scale the start-to-goal offset (e.g. 1.5 stretches the reach "
+        "50%% farther along the same axis). Values != 1.0 deviate from the "
+        "frozen instance and are exploratory renders, not benchmark rows.",
+    )
+    parser.add_argument(
         "--obstacle-scale",
         type=float,
         default=0.8,
@@ -67,6 +83,12 @@ def main() -> None:
             kwargs["obstacle_radius"] = (
                 float(kwargs["obstacle_radius"]) * args.obstacle_scale
             )
+        if args.max_steps is not None:
+            kwargs["max_steps"] = args.max_steps
+        if args.goal_scale != 1.0:
+            kwargs["goal_offset"] = tuple(
+                float(value) * args.goal_scale for value in kwargs["goal_offset"]
+            )
 
         protocol = manifest["feedback_protocol"]
         decision = mapper.infer(
@@ -95,6 +117,10 @@ def main() -> None:
             if args.obstacle_scale == 1.0
             else f"_obs{int(round(args.obstacle_scale * 100))}"
         )
+        if args.max_steps is not None:
+            suffix += f"_s{args.max_steps}"
+        if args.goal_scale != 1.0:
+            suffix += f"_goal{int(round(args.goal_scale * 100))}"
         output_dir = (
             Path(args.output_root) / f"render_nim_slack_random_{episode_id}{suffix}"
         )

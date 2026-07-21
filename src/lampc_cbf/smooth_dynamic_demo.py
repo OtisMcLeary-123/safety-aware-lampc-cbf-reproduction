@@ -2046,7 +2046,40 @@ def run_smooth_dynamic_demo(
                 reference_path[:, 0], reference_path[:, 1], "--", color="green",
                 linewidth=1.2, label="continuous B-spline reference",
             )
-            axes[0].plot(true_array[:, 0], true_array[:, 1], "r--", label="obstacle")
+            # Obstacle as a recessive context layer (paper Fig.-5 style): the
+            # sphere drawn to scale at sampled positions, opacity fading into
+            # the past, with a faint dashed center path — so the robot's
+            # avoidance path stays the dominant ink. Crop the obstacle path to
+            # the robot's neighborhood: with equal aspect, a long obstacle
+            # transit would otherwise stretch the panel into a thin strip.
+            focus = np.vstack([raw_positions[:, :2], start[None, :2], goal[None, :2]])
+            pad = combined_radius * 1.35
+            crop_x = (focus[:, 0].min() - pad, focus[:, 0].max() + pad)
+            crop_y = (focus[:, 1].min() - pad, focus[:, 1].max() + pad)
+            in_crop = (
+                (true_array[:, 0] > crop_x[0] - combined_radius * 0.4)
+                & (true_array[:, 0] < crop_x[1] + combined_radius * 0.4)
+                & (true_array[:, 1] > crop_y[0] - combined_radius * 0.4)
+                & (true_array[:, 1] < crop_y[1] + combined_radius * 0.4)
+            )
+            visible = true_array[in_crop]
+            if len(visible) >= 2:
+                snap_indices = np.linspace(0, len(visible) - 1, 7).astype(int)
+                for order, snap in enumerate(snap_indices):
+                    age = order / max(1, len(snap_indices) - 1)
+                    axes[0].add_patch(
+                        plt.Circle(
+                            visible[snap][:2], combined_radius,
+                            color="0.55", alpha=0.05 + 0.18 * age, linewidth=0,
+                        )
+                    )
+                axes[0].plot(
+                    visible[:, 0], visible[:, 1], color="0.55",
+                    linewidth=1.0, linestyle=(0, (2, 2)), alpha=0.8,
+                    label="obstacle path (spheres to scale, faded = past)",
+                )
+            axes[0].set_xlim(*crop_x)
+            axes[0].set_ylim(*crop_y)
             axes[0].scatter(start[0], start[1], c="black", label="start")
             axes[0].scatter(goal[0], goal[1], c="green", marker="*", s=140, label="goal")
             axes[0].set_aspect("equal", adjustable="box")
@@ -2054,7 +2087,7 @@ def run_smooth_dynamic_demo(
             axes[0].set_ylabel("y [m]")
             axes[0].set_title("Raw, visual spline, and MPC reference")
             axes[0].grid(True, alpha=0.3)
-            axes[0].legend(fontsize=7)
+            axes[0].legend(fontsize=7, loc="center left", bbox_to_anchor=(1.02, 0.5))
 
             axes[1].plot(time, true_clearances, label="raw true clearance")
             axes[1].plot(time, measured_clearances, label="raw measured clearance")
