@@ -1169,6 +1169,27 @@ def run_smooth_dynamic_demo(
         task.unsafe_region_radius = cfg.obstacle_radius
         task.unsafe_state_1_pos = true_obstacle.copy()
         task.unsafe_state_2_pos = hidden_obstacle.copy()
+        if cfg.save_animation:
+            # The panda-gym scene bakes the unsafe-region spheres at a fixed
+            # default radius; setting the attribute above only feeds task
+            # logic, not the visual mesh. Recreate the visible spheres at the
+            # true obstacle radius so the animation is not misleading. Guarded
+            # to the rendering path — the headless benchmark never touches it.
+            for body_name, body_position in (
+                ("unsafe_region_1", true_obstacle),
+                ("unsafe_region_2", hidden_obstacle),
+            ):
+                body_index = env.sim._bodies_idx.get(body_name)
+                if body_index is not None:
+                    env.sim.physics_client.removeBody(body_index)
+                env.sim.create_sphere(
+                    body_name=body_name,
+                    radius=float(cfg.obstacle_radius),
+                    mass=0.0,
+                    ghost=True,
+                    position=np.asarray(body_position, dtype=float),
+                    rgba_color=np.array([0.9, 0.1, 0.1, 0.3]),
+                )
         env.sim.set_base_pose("target", goal, quaternion)
         env.sim.set_base_pose("unsafe_region_1", true_obstacle, quaternion)
         env.sim.set_base_pose("unsafe_region_2", hidden_obstacle, quaternion)
