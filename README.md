@@ -1,81 +1,71 @@
 # Safety-Aware LaMPC-CBF Reproduction
 
-[![Targeted tests](https://img.shields.io/badge/targeted%20tests-47%20passed%20%7C%201%20skipped-brightgreen)](tests/)
+[![CI](https://github.com/OtisMcLeary-123/safety-aware-lampc-cbf-reproduction/actions/workflows/ci.yml/badge.svg)](https://github.com/OtisMcLeary-123/safety-aware-lampc-cbf-reproduction/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue)](pyproject.toml)
 [![CasADi](https://img.shields.io/badge/CasADi-3.7.2-orange)](pyproject.toml)
 [![do-mpc](https://img.shields.io/badge/do--mpc-5.1.1-orange)](pyproject.toml)
-[![License](https://img.shields.io/badge/license-research-lightgrey)](docs/REPRODUCIBILITY.md)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Clean-room simulator reproduction and engineering extension of language-guided
-MPC-CBF manipulation using Safe Panda Gym, do-mpc, CasADi, and IPOPT.
+model predictive control with control barrier functions (MPC-CBF) for Safe
+Panda manipulation. The implementation separates the controller, symbolic CBF,
+solver diagnostics, environment adapter, and experiment orchestration.
 
 > This repository is not an exact Table-4 reproduction, a physical-robot
-> result, or a whole-arm safety certificate.
+> result, or a whole-arm collision certificate.
 
-## 3-D Gamma Sweep Showcase
+## What Is Included
 
-Episode 1 was replayed with five fixed CBF decay values and a nominal
-direct-target baseline without CBF. Every run uses the same initial state,
-moving obstacle, 3-D waypoint reference, seed, and controller profile.
-
-![Safe Panda 3-D gamma sweep](artifacts/safe_panda_3d_feedback_episode_01/gamma_sweep/trajectory_gamma_sweep.png)
-
-| Method | Outcome | Steps | Minimum true clearance |
-|---|---|---:|---:|
-| `gamma=0.001` | Safety timeout | 260 | 82.58 mm |
-| `gamma=0.040` | Goal | 235 | 12.73 mm |
-| `gamma=0.065` | Goal | 233 | 3.65 mm |
-| `gamma=0.100` | Goal | 226 | 0.75 mm |
-| `gamma=0.150` | Collision | 142 | -0.23 mm |
-| Baseline: direct target, no CBF | Collision | 74 | -0.58 mm |
-
-The sweep illustrates the safety-efficiency tradeoff: very small gamma avoids
-the obstacle early but can time out, intermediate values reach the goal, and
-the least cautious value collides in this scenario. The baseline is a custom
-nominal comparator, not the paper's LaMPC-ED implementation.
-
-## Main Features
-
-| Capability | Status |
-|---|---|
-| Safe Panda Gym adapter | Included |
-| 8-state double-integrator MPC-CBF | Included |
-| CasADi symbolic CBF constraints | Included |
-| IPOPT fail-closed diagnostics | Included |
-| Dynamic obstacle sensing and noise | Included |
-| Fixed-vs-feedback paired benchmarks | Included |
-| 3-D spline and waypoint avoidance profile | Opt-in |
-| NVIDIA NIM contextual gamma replay | Explicitly authorized |
-| Whole-arm collision certificate | Not provided |
+- 8-state double-integrator MPC-CBF controller with CasADi and do-mpc.
+- Fail-closed IPOPT diagnostics and dynamic-obstacle sensing.
+- Deterministic fixed-vs-feedback benchmark runners.
+- Opt-in 3-D spline/waypoint avoidance and provider-feedback extensions.
+- Unit and integration tests for the controller, CBF, solver, adapter, and
+  benchmark contracts.
 
 ## Results
 
-### Primary 8-D benchmark
-
-The committed baseline is the Safe Panda 8-state double-integrator extension:
+The primary committed result is the Safe Panda 8-state engineering extension:
 
 | Method | Success | Collisions | Solver-failure steps |
 |---|---:|---:|---:|
 | Fixed `gamma=0.15` | 13/50 | 37/50 | 63 |
 | Contextual feedback | 13/50 | 37/50 | 240 |
 
-Paired success difference is `0.0` with exact McNemar `p=1.0`. This custom
-simulator benchmark does not show an efficacy improvement from feedback.
+The paired success difference is `0.0` with exact McNemar `p=1.0`; this profile
+does not show an efficacy improvement from feedback.
 
-### Opt-in 3-D provider extension
+The separate 3-D provider extension reaches `23/50` successes versus `19/50`
+for the fixed baseline, with McNemar `p=0.125`. It is an engineering extension,
+not evidence for the paper's GPT-4o/OpenAI claim. See
+[the detailed 3-D result](docs/SAFE_PANDA_3D_PROVIDER_50_RESULT.md).
 
-This separate engineering profile uses a 3-D B-spline, nonzero obstacle
-height/vertical motion, tangential reflexes, and one NVIDIA NIM decision per
-episode:
+### Gamma-sweep illustration (head-on encounter, frozen instance CS1-E00)
 
-| Method | Success | Collisions | Mean minimum clearance |
-|---|---:|---:|---:|
-| Fixed `gamma=0.15` | 19/50 | 31/50 | 3.54 mm |
-| Async provider feedback | 23/50 | 27/50 | 6.97 mm |
+One head-on episode from the frozen core benchmark, run under five fixed
+gamma values plus the checkpointed language-feedback protocol, all on the
+velocity-tube + soft-slack profile. Smaller gamma buys a visibly wider
+avoidance arc and larger clearance; every fixed gamma still times out on
+this instance, while the feedback run (gamma 0.15 to 0.05 at the frozen
+intervention time) is the only one that reaches the goal. Illustrative,
+not a population-level ranking — see
+[the 150-episode result](docs/SAFE_PANDA_CORE_SCENARIOS_150_RESULT.md).
 
-The paired difference is `+0.08`, but McNemar `p=0.125`; the difference is not
-statistically significant at `alpha=0.05`. Details are in
-[docs/SAFE_PANDA_3D_PROVIDER_50_RESULT.md](docs/SAFE_PANDA_3D_PROVIDER_50_RESULT.md).
+![Gamma sweep on a head-on encounter](docs/assets/gamma_sweep_cs1_headon.png)
+
+| Run | Outcome | Steps | Minimum true clearance |
+|---|---|---:|---:|
+| `gamma=0.001` | Safety timeout | 260 | 193.4 mm |
+| `gamma=0.040` | Safety timeout | 260 | 83.0 mm |
+| `gamma=0.065` | Safety timeout | 260 | 67.5 mm |
+| `gamma=0.150` | Safety timeout | 260 | 51.7 mm |
+| `gamma=1.000` | Safety timeout | 260 | 41.9 mm |
+| feedback `0.15→0.05` | **Goal** | 247 | 79.2 mm |
+
+#### Legacy single-episode sweep (side-crossing, historical profile)
+
+![Safe Panda 3-D gamma sweep](docs/assets/trajectory_gamma_sweep.png)
+| Direct-target baseline, no CBF | Collision | 74 | -0.58 mm |
 
 ## Installation
 
@@ -83,22 +73,26 @@ statistically significant at `alpha=0.05`. Details are in
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev,simulation]'
-python -m pip install 'do-mpc[full]==5.1.1'
 ```
 
-The full do-mpc extra provides ONNX, PyTorch, Jupyter, and OPC-UA integrations.
-Provider features require an explicitly authorized local token and are never
-needed for replaying a saved checkpoint.
+The optional `llm` extra is only needed for explicitly authorized provider
+experiments. Saved local checkpoints can be replayed without provider access.
 
 ## Quickstart
 
-Run the local test suite:
+Run the complete local test suite:
 
 ```bash
-PYTHONPATH=src pytest -q
+python -m pytest -q
 ```
 
-Run one explicit 3-D avoidance demo and save its animation/plots:
+Run the dry-run CLI (no solver or external API call):
+
+```bash
+lampc-cbf --gamma 0.15 --steps 1
+```
+
+Run the opt-in 3-D demo and save plots locally:
 
 ```bash
 PYTHONPATH=src python scripts/run_3d_avoidance_demo.py \
@@ -114,83 +108,61 @@ PYTHONPATH=src python scripts/run_3d_avoidance_demo.py \
   --output-dir artifacts/3d_avoidance_demo
 ```
 
-Outputs include `metrics.json`, `robot_motion.gif`,
-`raw_smoothed_and_safety.png`, and `trajectory_3d_comparison.png`.
+For experiment contracts and assumptions, start with
+[Reproducibility](docs/REPRODUCIBILITY.md). The 3-D visualization profile is
+documented in [3D Avoidance Demo](docs/3D_AVOIDANCE_DEMO.md).
 
-## Reproduce the 50-Case 3-D Provider Extension
+## Edit the Three Core Scenarios
 
-The provider collector resumes from its checkpoint and saves after each
-accepted request:
-
-```bash
-PYTHONPATH=src python scripts/collect_safe_panda_3d_feedback.py \
-  --request-interval-seconds 1.0
-
-PYTHONPATH=src python scripts/run_safe_panda_3d_benchmark.py
-```
-
-To render a successful async-feedback episode with GIF and Figure-5-style
-plots:
+Launch the local Scenario Lab to inspect and edit the three planned scenario
+families before generating the 150 resolved benchmark instances:
 
 ```bash
-PYTHONPATH=src python scripts/render_safe_panda_3d_feedback_episode.py \
-  --episode-id 1 \
-  --output-dir artifacts/safe_panda_3d_feedback_episode_01
+PYTHONPATH=src .venv/bin/python scripts/run_safe_panda_scenario_editor.py
 ```
 
-To reproduce the five-gamma plus baseline Figure-5-style sweep:
+For an actual PyBullet window with the Panda URDF, table, goal, obstacle,
+trajectory guide, sliders, and direct x/y dragging, run:
 
 ```bash
-PYTHONPATH=src python scripts/render_safe_panda_3d_gamma_sweep.py \
-  --episode-id 1 \
-  --output-dir artifacts/safe_panda_3d_feedback_episode_01/gamma_sweep
+PYTHONPATH=src .venv/bin/python scripts/run_safe_panda_3d_scenario_editor.py
 ```
 
-The sweep writes `trajectory_gamma_sweep.png`,
-`gamma_sweep_summary.csv`, and `gamma_sweep_summary.json`.
+The editor is browser-local, does not call a provider, and never overwrites the
+authoritative manifest. See
+[docs/SAFE_PANDA_SCENARIO_EDITOR.md](docs/SAFE_PANDA_SCENARIO_EDITOR.md) and
+[docs/SAFE_PANDA_CORE_SCENARIO_PLAN.md](docs/SAFE_PANDA_CORE_SCENARIO_PLAN.md).
 
-Provider decisions are model-substitution evidence (`meta/llama-3.1-8b-instruct`),
-not GPT-4o/OpenAI evidence. Raw checkpoints and credentials remain local.
-
-## Repository Structure
+## Repository Layout
 
 ```text
 configs/       versioned experiment and fidelity manifests
-docs/          reproduction plans, protocols, result reports, and handoffs
-scripts/       benchmark, provider, rendering, and replay entrypoints
-src/lampc_cbf/ MPC-CBF, CBF, solver, Safe Panda, and language modules
+docs/          methods, results, reproducibility, and demo notes
+scripts/       reproducible experiment entrypoints
+src/lampc_cbf/ controller, CBF, solver, environment, and language modules
 tests/         unit and integration tests
-artifacts/     local generated evidence (mostly ignored by Git)
+docs/assets/   small checked-in figures used by the README
 ```
 
-Ownership boundaries and specialist responsibilities are documented in
-[AGENTS.md](AGENTS.md). The package design separates the controller, symbolic
-CBF, solver diagnostics, environment adapter, and integration orchestration.
+Generated trajectories, provider records, credentials, virtual environments,
+and source PDFs are intentionally excluded from the public tree. Aggregate
+benchmark tables are retained only where explicitly documented by the
+experiment contract.
 
-## Reproducibility and Limitations
+## Scope and Limitations
 
 - The 8-D benchmark is an engineering extension, not an exact paper recreation.
-- The 3-D profile is a custom route/reflex extension over the same deterministic
-  scenario suite.
-- Provider context for the 3-D replay is a nominal spline proxy because exact
+- The 3-D profile adds a custom route, obstacle geometry, and safety reflex.
+- Provider context for the 3-D replay uses a nominal spline proxy because exact
   intervention-time state is unavailable before precollection.
-- The CBF is an end-effector analytical clearance barrier; it is not a whole-arm
-  collision certificate.
-- Generated results, raw provider metadata, credentials, and virtual
-  environments must not be committed.
+- The CBF certifies analytical end-effector clearance, not whole-arm collision
+  avoidance.
 
-See [docs/NEXT_THREAD_HANDOFF.md](docs/NEXT_THREAD_HANDOFF.md),
-[docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md), and
-[docs/3D_AVOIDANCE_DEMO.md](docs/3D_AVOIDANCE_DEMO.md) for the current handoff
-and experiment contracts.
-
-## Citation
-
-This repository is a clean-room reproduction and extension. Cite the source
-paper separately according to the paper manifest and cite this repository when
-referencing the implementation, benchmark scripts, or generated analysis.
+See [Reproducibility](docs/REPRODUCIBILITY.md) for source assumptions,
+locked versions, and validation boundaries.
 
 ## License
 
-See the project metadata and source-paper/license notes in
-[docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md).
+The repository code is released under the [MIT License](LICENSE); external
+dependencies and the source paper retain their own licenses and attribution
+requirements.

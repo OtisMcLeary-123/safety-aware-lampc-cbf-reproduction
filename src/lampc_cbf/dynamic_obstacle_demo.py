@@ -65,42 +65,63 @@ class OnlineObstacleCBF:
         gamma: float,
         dt: float,
         horizon: int,
+        dead_time_speed_bound: float = 0.0,
     ) -> None:
         import numpy as np
 
         if not 0.0 < gamma <= 1.0:
             raise ValueError("gamma must satisfy 0 < gamma <= 1")
+        if dead_time_speed_bound < 0.0:
+            raise ValueError("dead_time_speed_bound must be non-negative")
         self.measurement = np.asarray(initial_measurement, dtype=float).reshape(3)
         self.combined_radius = obstacle_radius + collision_radius
         self.gamma = gamma
         self.dt = dt
         self.horizon = horizon
+        self.dead_time_speed_bound = float(dead_time_speed_bound)
+        self.measurement_age = 0.0
         self._tvp = None
+        self._radius_tvp = None
 
-    def update_measurement(self, measurement: Sequence[float]) -> None:
+    def update_measurement(
+        self, measurement: Sequence[float], *, age_s: float = 0.0
+    ) -> None:
         import numpy as np
 
         value = np.asarray(measurement, dtype=float)
         if value.shape != (3,) or not np.all(np.isfinite(value)):
             raise ValueError("obstacle measurement must be a finite 3-vector")
+        if age_s < 0.0:
+            raise ValueError("measurement age must be non-negative")
         self.measurement = value.copy()
+        self.measurement_age = float(age_s)
+
+    def stage_radius(self, stage: int) -> float:
+        """Conservative next-age radius covering held-measurement drift."""
+
+        return self.combined_radius + self.dead_time_speed_bound * (
+            self.measurement_age + (stage + 1) * self.dt
+        )
 
     def declare_tvp(self, model: Any, x: Any, u: Any, ca: Any) -> None:
         del x, u, ca
         self._tvp = model.set_variable(
             var_type="_tvp", var_name="obstacle_position", shape=(3, 1)
         )
+        self._radius_tvp = model.set_variable(
+            var_type="_tvp", var_name="obstacle_cbf_radius", shape=(1, 1)
+        )
 
     def add_constraint(
         self, model: Any, mpc: Any, x: Any, u: Any, ca: Any
     ) -> None:
         del model, u
-        if self._tvp is None:
+        if self._tvp is None or self._radius_tvp is None:
             raise RuntimeError("declare_tvp must run before add_constraint")
         position = x[:3]
         next_position = position + self.dt * x[4:7]
-        h_current = ca.sumsqr(position - self._tvp) - self.combined_radius**2
-        h_next = ca.sumsqr(next_position - self._tvp) - self.combined_radius**2
+        h_current = ca.sumsqr(position - self._tvp) - self._radius_tvp**2
+        h_next = ca.sumsqr(next_position - self._tvp) - self._radius_tvp**2
         mpc.set_nl_cons(
             "dynamic_obstacle_cbf",
             (1.0 - self.gamma) * h_current - h_next,
@@ -114,6 +135,9 @@ class OnlineObstacleCBF:
             for stage in range(self.horizon + 1):
                 template["_tvp", stage, "obstacle_position"] = (
                     self.measurement.reshape(3, 1)
+                )
+                template["_tvp", stage, "obstacle_cbf_radius"] = (
+                    self.stage_radius(stage)
                 )
             return template
 

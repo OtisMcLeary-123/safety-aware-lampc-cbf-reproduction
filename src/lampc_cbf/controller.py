@@ -15,7 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 STATE_NAMES = ("x", "y", "z", "psi", "dx", "dy", "dz", "dpsi")
 INPUT_NAMES = ("u_x", "u_y", "u_z", "u_psi")
-DYNAMICS_MODES = ("paper_state", "double_integrator")
+DYNAMICS_MODES = ("paper_state", "double_integrator", "paper_increment")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +42,10 @@ class PaperMPCConfig:
     optimal_decay_nominal: float = 1.0
     optimal_decay_lower: float = 0.1
     optimal_decay_upper: float = 1.0
+    # L1 exact-penalty weight for the per-stage CBF slack input; 0 disables
+    # the slack variable entirely (frozen hard-constraint baseline).
+    cbf_slack_weight: float = 0.0
+    cbf_slack_upper: float = 10.0
     target_tvp_name: str | None = None
     velocity_regularization: float = 0.1
     yaw_regularization: float = 5e-5
@@ -91,13 +95,18 @@ class PaperMPCConfig:
             raise ValueError("input limits must be positive")
         if self.dynamics_mode not in DYNAMICS_MODES:
             raise ValueError(
-                "dynamics_mode must be paper_state or double_integrator"
+                "dynamics_mode must be paper_state, double_integrator, "
+                "or paper_increment"
             )
         if self.target_tvp_name == "":
             raise ValueError("target_tvp_name must be non-empty when provided")
         if not 0.0 < self.optimal_decay_lower <= self.optimal_decay_nominal <= self.optimal_decay_upper <= 1.0:
             raise ValueError(
                 "optimal decay bounds must satisfy 0 < lower <= nominal <= upper <= 1"
+            )
+        if self.cbf_slack_weight < 0.0 or self.cbf_slack_upper <= 0.0:
+            raise ValueError(
+                "cbf_slack_weight must be non-negative and cbf_slack_upper positive"
             )
 
     @property
@@ -107,6 +116,10 @@ class PaperMPCConfig:
     @property
     def uses_optimal_decay(self) -> bool:
         return self.optimal_decay_weight > 0.0
+
+    @property
+    def uses_cbf_slack(self) -> bool:
+        return self.cbf_slack_weight > 0.0
 
     @property
     def state_lower(self) -> tuple[float, ...]:
@@ -183,6 +196,9 @@ def dynamics_matrices(
     """Return the canonical A/B pair for a configured transition mode."""
 
     if mode == "paper_state":
+        # The paper's printed eq. (18): A = [[I4, I4*dt], [0_4, 0_4]],
+        # B = [[0_4], [I4]], so the input is the commanded velocity
+        # ``d_next = u``.  See deviation registry entry 1.1.
         if dt <= 0.0:
             raise ValueError("dt must be positive")
         a = tuple(
@@ -201,7 +217,35 @@ def dynamics_matrices(
         return a, b
     if mode == "double_integrator":
         return double_integrator_dynamics_matrices(dt)
-    raise ValueError("mode must be paper_state or double_integrator")
+    if mode == "paper_increment":
+        # Non-paper variant: A = [[I4, I4*dt], [0_4, I4]], B = [[0_4], [I4]],
+        # so the input is a velocity increment ``d_next = d + u``.  The
+        # printed eq. (18) has 0_4 in A's lower-right block (see the
+        # ``paper_state`` branch); this variant is kept for comparison.
+        # See deviation registry entry 1.1.
+        if dt <= 0.0:
+            raise ValueError("dt must be positive")
+        a = tuple(
+            tuple(
+                float(row == column)
+                if row < 4 and column < 4
+                else (
+                    dt
+                    if row < 4 and column == row + 4
+                    else float(row == column) if row >= 4 else 0.0
+                )
+                for column in range(8)
+            )
+            for row in range(8)
+        )
+        b = tuple(
+            tuple(float(row >= 4 and column == row - 4) for column in range(4))
+            for row in range(8)
+        )
+        return a, b
+    raise ValueError(
+        "mode must be paper_state, double_integrator, or paper_increment"
+    )
 
 
 def discrete_state_transition(
@@ -285,6 +329,11 @@ def build_mpc_controller(
         if cfg.uses_optimal_decay
         else None
     )
+    slack = (
+        model.set_variable(var_type="_u", var_name="cbf_slack", shape=(1, 1))
+        if cfg.uses_cbf_slack
+        else None
+    )
     a_values, b_values = dynamics_matrices(cfg.dt, mode=cfg.dynamics_mode)
     a = ca.DM(a_values)
     b = ca.DM(b_values)
@@ -343,6 +392,11 @@ def build_mpc_controller(
         stage_cost += cfg.optimal_decay_weight * (
             decay - cfg.optimal_decay_nominal
         ) ** 2
+    if slack is not None:
+        # Linear (L1) penalty: exact for weights above the active constraint
+        # multiplier, so the slack stays at zero whenever the hard problem
+        # is feasible.
+        stage_cost += cfg.cbf_slack_weight * slack
     mpc.set_objective(mterm=terminal_cost, lterm=stage_cost)
     delta_u = u - mpc.u_prev["u"]
     delta_u_cost = (
@@ -361,6 +415,9 @@ def build_mpc_controller(
     if decay is not None:
         mpc.bounds["lower", "_u", "cbf_decay"] = cfg.optimal_decay_lower
         mpc.bounds["upper", "_u", "cbf_decay"] = cfg.optimal_decay_upper
+    if slack is not None:
+        mpc.bounds["lower", "_u", "cbf_slack"] = 0.0
+        mpc.bounds["upper", "_u", "cbf_slack"] = cfg.cbf_slack_upper
 
     for builder in constraint_builders:
         builder(model, mpc, x, u, ca)

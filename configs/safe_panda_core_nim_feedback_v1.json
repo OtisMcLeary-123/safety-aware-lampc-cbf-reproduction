@@ -1,0 +1,45 @@
+{
+  "profile_name": "safe_panda_core_nim_feedback_v1",
+  "created": "2026-07-17",
+  "status": "predeclared_before_any_provider_call",
+  "purpose": "LLM-feedback arm of the core 150-episode benchmark: NVIDIA NIM llama-3.1-8b-instruct (authorized GPT-4o substitute, registry 3.1) decides a continuous gamma_new at the frozen per-instance feedback time, on the velocity-tube controller base.",
+  "method": "safe_panda_core_nim_feedback",
+  "paired_against_methods": ["safe_panda_core_velocity_tube", "safe_panda_core_fixed_g015"],
+  "instances": "configs/safe_panda_core_scenarios_150_instances.json",
+  "instances_sha256": "e0f154604660f79d6dfb26d83ed5b60955b8977f991365a228e739ff8fededdf",
+  "controller_base": {
+    "rationale": "Predeclared per user directive 2026-07-17: the scripted arm proved gamma-only feedback is outcome-inert on the static base (150/150 concordant, p=1.0); the LLM arm therefore runs on the velocity-tube base, the only profile with headroom (55 timeouts, 24 collisions).",
+    "runner_kwargs_overrides": {
+      "prediction_mode": "velocity_tube"
+    }
+  },
+  "provider": {
+    "name": "nvidia_nim",
+    "model": "meta/llama-3.1-8b-instruct",
+    "authorized_by_user": "2026-07-17 session directive",
+    "request_budget_max": 150,
+    "request_policy": "one gamma decision per episode at its frozen feedback_intervention_time_s; identical prompts may be served from the local checkpoint cache, so unique requests may be fewer than 150",
+    "checkpoint_dir": "artifacts/safe_panda_core_scenarios_150_nim_feedback/provider_checkpoints",
+    "replay_rule": "every request/response checkpointed verbatim before use; reruns must replay from checkpoints and consume zero new requests"
+  },
+  "feedback_protocol": {
+    "user_utterance": "Watch out! I think it's going to crash soon.",
+    "utterance_source": "paper Table-4 ablation protocol, Section V-C",
+    "context_given_to_llm": "current gamma (0.15), task instruction, scene summary (EE-reach, one moving spherical obstacle), per paper eq. (16) OF inputs",
+    "gamma_output_range": "continuous (0, 1] per paper Tables 1-2 (paper-fidelity path, registry 3.3)",
+    "gamma_range_mode": "paper_continuous",
+    "table2_label_recording": "every decision is logged with its Table-2 label: 1 (0,0.06], 2 (0.06,0.08], 3 (0.08,0.15], 4 =0.15, 5 (0.15,1]",
+    "application_time": "feedback_intervention_time_s + measured_api_latency_s (recorded per episode; no idealized zero latency)",
+    "gamma_update_ttl_s": 10.4,
+    "invalid_output_policy": "unparseable or out-of-range outputs are recorded and the episode keeps gamma 0.15 (no retry, no silent substitution)"
+  },
+  "statistics": {
+    "primary": "paired collision_free_goal_success vs safe_panda_core_velocity_tube, exact McNemar per family, Holm across families",
+    "note": "gamma > 0.15 loosens safety below the fixed arm; this is an accepted possible outcome of the paper-faithful continuous range and must be reported, not clamped"
+  },
+  "claim_limits": [
+    "simulator-only, EE-reach-only, GPT-4o substituted by NIM llama-3.1-8b-instruct",
+    "no formal bounded-error safety claim (Gaussian noise)",
+    "descriptive result for this repository's profiles; not a reproduction of the paper's Table 4"
+  ]
+}

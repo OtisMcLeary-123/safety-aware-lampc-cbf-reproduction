@@ -6,8 +6,29 @@ build-backend = "setuptools.build_meta"
 name = "safety-aware-lampc-cbf"
 version = "0.1.0"
 description = "Reproduction of language-guided MPC-CBF safe manipulation"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Otis McLeary"}]
 requires-python = ">=3.10"
 dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Repository = "https://github.com/OtisMcLeary-123/safety-aware-lampc-cbf-reproduction"
+Issues = "https://github.com/OtisMcLeary-123/safety-aware-lampc-cbf-reproduction/issues"
+
+[project.scripts]
+lampc-cbf = "lampc_cbf.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

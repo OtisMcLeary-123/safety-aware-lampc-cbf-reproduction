@@ -16,10 +16,13 @@ from time import time
 from typing import Any, Callable
 
 
-def _valid_gamma(value: float) -> float:
+def _valid_gamma(value: float, upper: float = 0.15) -> float:
+    """Default upper bound is the paper-experiment interval; the
+    paper-continuous mode (registry 3.3) may widen it to 1.0."""
+
     converted = float(value)
-    if not isfinite(converted) or not 0.0 < converted <= 0.15:
-        raise ValueError("gamma must be finite and in (0, 0.15]")
+    if not isfinite(converted) or not 0.0 < converted <= upper:
+        raise ValueError(f"gamma must be finite and in (0, {upper:g}]")
     return converted
 
 
@@ -33,7 +36,9 @@ class GammaUpdate:
     source: str = "llm"
 
     def __post_init__(self) -> None:
-        _valid_gamma(self.gamma)
+        # Absolute published bound (0, 1]; the store enforces the tighter
+        # configured interval at apply time.
+        _valid_gamma(self.gamma, upper=1.0)
         if self.version < 1:
             raise ValueError("version must be positive")
         if not isfinite(self.created_at) or not isfinite(self.valid_until):
@@ -98,8 +103,15 @@ class GammaUpdateQueue:
 class AtomicGammaStore:
     """Controller-owned gamma, updated only by :meth:`apply_pending`."""
 
-    def __init__(self, initial_gamma: float, *, clock_skew_tolerance: float = 0.05) -> None:
-        self._gamma = _valid_gamma(initial_gamma)
+    def __init__(
+        self,
+        initial_gamma: float,
+        *,
+        clock_skew_tolerance: float = 0.05,
+        gamma_upper: float = 0.15,
+    ) -> None:
+        self.gamma_upper = float(gamma_upper)
+        self._gamma = _valid_gamma(initial_gamma, upper=self.gamma_upper)
         self._version = 0
         self._lock = Lock()
         if clock_skew_tolerance < 0.0 or not isfinite(clock_skew_tolerance):
@@ -129,6 +141,10 @@ class AtomicGammaStore:
                     future += 1
                 elif update.valid_until < timestamp:
                     expired += 1
+                elif not 0.0 < update.gamma <= self.gamma_upper:
+                    # Out of the configured range: rejected as stale-invalid,
+                    # visible in the audit trail rather than silently applied.
+                    old += 1
                 else:
                     eligible.append(update)
             selected = max(eligible, key=lambda item: item.version, default=None)
@@ -178,7 +194,7 @@ class AsyncGammaWorker:
     ) -> tuple[GammaRequest, Future[GammaUpdate | None]]:
         if not instruction.strip() or not reason.strip():
             raise ValueError("instruction and reason must be non-empty")
-        _valid_gamma(current_gamma)
+        _valid_gamma(current_gamma, upper=1.0)
         if not isfinite(ttl_seconds) or ttl_seconds <= 0.0:
             raise ValueError("ttl_seconds must be finite and positive")
         created = float(self.clock())

@@ -32,8 +32,10 @@ class SafetyProfile:
     reason: str = "nominal"
 
     def __post_init__(self) -> None:
-        if not isfinite(self.gamma) or not 0.0 < self.gamma <= 0.15:
-            raise ValueError("gamma must be finite and in (0, 0.15]")
+        # Absolute published bound (0, 1]; scheduler configs and the demo's
+        # gamma_range_mode enforce the tighter experimental interval.
+        if not isfinite(self.gamma) or not 0.0 < self.gamma <= 1.0:
+            raise ValueError("gamma must be finite and in (0, 1]")
         _finite_nonnegative(self.clearance_margin, "clearance_margin")
         if not isfinite(self.speed_scale) or not 0.0 < self.speed_scale <= 1.0:
             raise ValueError("speed_scale must be finite and in (0, 1]")

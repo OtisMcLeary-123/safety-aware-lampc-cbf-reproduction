@@ -89,6 +89,46 @@ def test_discrete_state_transition_uses_double_integrator_pair() -> None:
     assert average_velocity == pytest.approx((0.11, -0.188, 0.286))
 
 
+def test_paper_state_dynamics_match_printed_equation_18() -> None:
+    dt = 0.04
+    state = (1.0, 2.0, 3.0, 0.2, 0.1, -0.2, 0.3, -0.4)
+    command = (0.5, 0.6, -0.7, 0.8)
+
+    next_state = discrete_state_transition(
+        state, command, dt=dt, mode="paper_state"
+    )
+
+    # Printed eq. (18): A = [[I4, I4*dt], [0_4, 0_4]], B = [[0_4], [I4]],
+    # so p_next = p + dt*d (input-independent) and d_next = u.
+    assert next_state[:4] == pytest.approx((1.004, 1.992, 3.012, 0.184))
+    assert next_state[4:] == pytest.approx(command)
+    a, b = dynamics_matrices(dt, mode="paper_state")
+    assert a[4][4] == pytest.approx(0.0)
+    assert a[0][4] == pytest.approx(dt)
+    assert b[0][0] == pytest.approx(0.0)
+    assert b[4][0] == pytest.approx(1.0)
+
+
+def test_paper_increment_variant_uses_velocity_increment_input() -> None:
+    dt = 0.04
+    state = (1.0, 2.0, 3.0, 0.2, 0.1, -0.2, 0.3, -0.4)
+    increment = (0.5, 0.6, -0.7, 0.8)
+
+    next_state = discrete_state_transition(
+        state, increment, dt=dt, mode="paper_increment"
+    )
+
+    # Non-paper variant (registry 1.1): A's lower-right block is I4, so
+    # p_next = p + dt*d (input-independent) and d_next = d + u.
+    assert next_state[:4] == pytest.approx((1.004, 1.992, 3.012, 0.184))
+    assert next_state[4:] == pytest.approx((0.6, 0.4, -0.4, 0.4))
+    a, b = dynamics_matrices(dt, mode="paper_increment")
+    assert a[4][4] == pytest.approx(1.0)
+    assert a[0][4] == pytest.approx(dt)
+    assert b[0][0] == pytest.approx(0.0)
+    assert b[4][0] == pytest.approx(1.0)
+
+
 def test_dynamics_matrix_dispatch_preserves_paper_mode() -> None:
     assert dynamics_matrices(0.04, mode="paper_state") == paper_dynamics_matrices(0.04)
     assert dynamics_matrices(0.04, mode="double_integrator") == double_integrator_dynamics_matrices(0.04)

@@ -48,7 +48,7 @@ model must be preregistered before reconsidering promotion.
 ## Reproduce the blocked grid
 
 ```bash
-PYTHONPATH=src python scripts/run_dpcbf_ablation.py \
+PYTHONPATH=src python scripts/archive/run_dpcbf_ablation.py \
   --episodes 4 --workers 4 --max-steps 140 \
   --output-dir artifacts/dpcbf_grid_4
 ```

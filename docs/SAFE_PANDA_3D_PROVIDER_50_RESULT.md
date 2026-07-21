@@ -60,8 +60,9 @@ Async-feedback episode 1 was replayed with plots and animation enabled:
 - Minimum true clearance: `0.02287 m`
 - Raw trajectory ranges: `x=-0.0049..0.1380 m`, `z=0.1990..0.3147 m`
 
-Generated GIF, PNG, CSV, metrics, and raw provider checkpoints remain local and
-are excluded from commits under the repository artifact/credential policy.
+Raw animations, trajectory metrics, CSV files, and provider checkpoints remain
+local under the repository artifact/credential policy. One derived gamma-sweep
+summary figure is checked in under `docs/assets/` for the public README.
 
 ## Episode-1 Gamma Sweep
 

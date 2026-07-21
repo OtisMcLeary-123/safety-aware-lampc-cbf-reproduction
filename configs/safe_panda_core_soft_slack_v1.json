@@ -1,0 +1,20 @@
+{
+  "profile_name": "safe_panda_core_soft_slack_v1",
+  "created": "2026-07-17",
+  "purpose": "Remedy arm: soft horizon CBF with per-stage slack input and L1 exact penalty (mandated remedy profile 1). Slack stays at zero whenever the hard problem is feasible; when infeasible, the solver returns a least-violation action instead of failing closed.",
+  "method": "safe_panda_core_soft_slack",
+  "baseline_method": "safe_panda_core_fixed_g015",
+  "instances": "configs/safe_panda_core_scenarios_150_instances.json",
+  "instances_sha256": "e0f154604660f79d6dfb26d83ed5b60955b8977f991365a228e739ff8fededdf",
+  "provider_requests": 0,
+  "runner_kwargs_overrides": {
+    "prediction_mode": "velocity_tube",
+    "cbf_slack_weight": 1000.0
+  },
+  "notes": [
+    "Runs on the velocity-tube base (the only arm that improved the primary endpoint) so the slack targets that arm's 11.7% solver-failure steps; the static-base variant would inherit the dead-time collisions the slack cannot fix.",
+    "Penalty weight 1000 per unit slack (h is in m^2, typical magnitudes <= 0.1): far above observed constraint multipliers, so the penalty is exact and slack activates only under genuine infeasibility.",
+    "Slack bounded to [0, 10]; the collision barrier itself is untouched (isotropic Euclidean, radii unchanged) - softness is strictly a feasibility valve, per the never-weaken-the-barrier rule the barrier value h and all true-clearance metrics are computed exactly as before.",
+    "Fail-closed path remains for any residual solver failure."
+  ]
+}

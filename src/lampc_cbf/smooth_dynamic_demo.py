@@ -83,6 +83,44 @@ class SmoothDynamicConfig:
     # ``paper_state`` retains the replacement-state transition.
     # ``double_integrator`` uses acceleration input and exact discretization.
     cbf_transition_mode: str = "command_velocity"
+    # ``horizon`` keeps the frozen-baseline CBF constraint on every stage.
+    # ``first_step`` is the opt-in hard one-step D-GCBF remedy profile.
+    cbf_constraint_scope: str = "horizon"
+    # ``zero`` keeps the frozen fail-closed zero command on solver rejection.
+    # ``brake`` is the opt-in braking-fallback remedy profile: decay the last
+    # velocity and accept it only if it passes a one-step CBF screen.
+    solver_fallback_mode: str = "zero"
+    fallback_braking_decay: float = 0.5
+    # Paper eq. (3e) declares a terminal set X_f without publishing it.
+    # This opt-in reconstruction enforces the terminal safe set h(p_N) >= 0.
+    # Deviation registry entry 1.2.
+    terminal_safe_set_enabled: bool = False
+    # ``repository`` keeps the frozen IpoptConfig; ``reference_defaults``
+    # uses library-default IPOPT as verified in the reference repositories
+    # (deviation registry entry 1.3).
+    ipopt_profile: str = "repository"
+    # Dead-time-robust CBF margin for the static prediction mode (ZOCBF-style
+    # remedy, arXiv:2005.06418 / 2411.17079): inflate the constraint radius by
+    # ``speed_bound * (time since last measurement + stage offset)`` so the
+    # barrier covers any obstacle motion between sensor updates. ``off``
+    # preserves the frozen baseline. Planning-side only — true-clearance
+    # metrics keep the raw combined radius.
+    dead_time_margin_mode: str = "off"
+    dead_time_obstacle_speed_bound: float = 0.20
+    # Soft-slack remedy (skill remedy profile 1): per-stage CBF slack with an
+    # L1 exact penalty. 0 keeps the frozen hard constraint.
+    cbf_slack_weight: float = 0.0
+    # ``paper_experiment`` keeps the frozen (0, 0.15] gamma interval from the
+    # paper's trajectory experiment. ``paper_continuous`` opts into the full
+    # published Table-1/2 range (0, 1] for scheduled/feedback gammas
+    # (registry 3.3 paper-fidelity path).
+    gamma_range_mode: str = "paper_experiment"
+    # Channel-2 feedback arm: language switches the obstacle PREDICTION
+    # mode mid-episode instead of (or alongside) gamma. Each entry is
+    # (time, mode); mode must be a valid prediction_mode. gamma is left
+    # untouched by this schedule -- it isolates the prediction channel.
+    prediction_mode_schedule: tuple[tuple[float, str], ...] = ()
+    prediction_mode_schedule_request_times: tuple[float, ...] = ()
     gamma_schedule: tuple[tuple[float, float], ...] = ()
     gamma_schedule_request_times: tuple[float, ...] = ()
     gamma_update_ttl: float = 1.0
@@ -107,13 +145,24 @@ class SmoothDynamicConfig:
     save_metrics: bool = True
     output_dir: str = "artifacts/smoothness_ablation/spline_du_0.5"
 
+    @property
+    def gamma_upper(self) -> float:
+        return 1.0 if self.gamma_range_mode == "paper_continuous" else 0.15
+
     def __post_init__(self) -> None:
         if self.delta_u_weight < 0.0 or self.jerk_weight < 0.0 or self.optimal_decay_weight < 0.0:
             raise ValueError("smoothness weights must be non-negative")
         if not 0.0 < self.optimal_decay_lower <= 1.0:
             raise ValueError("optimal_decay_lower must be in (0, 1]")
-        if not 0.0 < self.gamma <= 0.15:
-            raise ValueError("paper experiment requires 0 < gamma <= 0.15")
+        if self.gamma_range_mode not in {"paper_experiment", "paper_continuous"}:
+            raise ValueError(
+                "gamma_range_mode must be paper_experiment or paper_continuous"
+            )
+        if not 0.0 < self.gamma <= self.gamma_upper:
+            raise ValueError(
+                "gamma must be in (0, %.2f] for gamma_range_mode %s"
+                % (self.gamma_upper, self.gamma_range_mode)
+            )
         if self.max_steps < 1 or self.render_stride < 1:
             raise ValueError("step counts must be positive")
         if self.sensor_period <= 0.0 or self.reference_speed <= 0.0:
@@ -225,17 +274,31 @@ class SmoothDynamicConfig:
             "paper_state",
             "command_velocity",
             "double_integrator",
+            "paper_increment",
         }:
             raise ValueError(
                 "cbf_transition_mode must be paper_state, command_velocity, "
-                "or double_integrator"
+                "double_integrator, or paper_increment"
             )
-        if self.cbf_transition_mode == "double_integrator" and (
+        if self.cbf_transition_mode in {"double_integrator", "paper_increment"} and (
             self.safety_reflex_enabled or self.formal_safety_filter_enabled
         ):
             raise ValueError(
-                "double_integrator mode requires reflex and formal filters disabled"
+                "double_integrator and paper_increment modes require reflex "
+                "and formal filters disabled"
             )
+        if self.cbf_constraint_scope not in {"horizon", "first_step"}:
+            raise ValueError(
+                "cbf_constraint_scope must be horizon or first_step"
+            )
+        if self.solver_fallback_mode not in {"zero", "brake"}:
+            raise ValueError("solver_fallback_mode must be zero or brake")
+        if self.ipopt_profile not in {"repository", "reference_defaults"}:
+            raise ValueError(
+                "ipopt_profile must be repository or reference_defaults"
+            )
+        if not 0.0 <= self.fallback_braking_decay < 1.0:
+            raise ValueError("fallback_braking_decay must be in [0, 1)")
         if not 1 <= self.requested_safety_level <= 5:
             raise ValueError("requested_safety_level must be in [1, 5]")
         if self.safety_exit_ttc_hysteresis < 0.0:
@@ -252,10 +315,45 @@ class SmoothDynamicConfig:
             raise ValueError("solver_max_cpu_time must be positive")
         if self.control_deadline <= 0.0:
             raise ValueError("control_deadline must be positive")
+        if self.dead_time_margin_mode not in {"off", "speed_bound"}:
+            raise ValueError("dead_time_margin_mode must be off or speed_bound")
+        if self.dead_time_margin_mode == "speed_bound":
+            if self.prediction_mode != "static":
+                raise ValueError(
+                    "dead_time_margin_mode requires prediction_mode static; "
+                    "velocity modes already carry the uncertainty tube"
+                )
+            if self.dead_time_obstacle_speed_bound <= 0.0:
+                raise ValueError(
+                    "dead_time_obstacle_speed_bound must be positive"
+                )
+        if self.cbf_slack_weight < 0.0:
+            raise ValueError("cbf_slack_weight must be non-negative")
         if any(time < 0.0 for time in self.provisional_feedback_times):
             raise ValueError("provisional feedback times must be non-negative")
         if tuple(sorted(self.provisional_feedback_times)) != self.provisional_feedback_times:
             raise ValueError("provisional feedback times must be sorted")
+        previous_prediction_time = -1.0
+        for switch_time, mode in self.prediction_mode_schedule:
+            if switch_time < 0.0 or switch_time < previous_prediction_time:
+                raise ValueError(
+                    "prediction_mode_schedule times must be non-negative and sorted"
+                )
+            if mode not in {"static", "velocity", "velocity_tube"}:
+                raise ValueError("scheduled prediction mode must be a valid mode")
+            previous_prediction_time = switch_time
+        if self.prediction_mode_schedule_request_times and (
+            len(self.prediction_mode_schedule_request_times)
+            != len(self.prediction_mode_schedule)
+            or any(
+                time < 0.0
+                for time in self.prediction_mode_schedule_request_times
+            )
+        ):
+            raise ValueError(
+                "prediction_mode_schedule request times must be non-negative "
+                "and match schedule"
+            )
         if self.gamma_schedule_request_times and (
             len(self.gamma_schedule_request_times) != len(self.gamma_schedule)
             or any(time < 0.0 for time in self.gamma_schedule_request_times)
@@ -269,16 +367,20 @@ class SmoothDynamicConfig:
             raise ValueError("feedback_response_latency must be non-negative")
         if self.feedback_reaction_margin < 0.0:
             raise ValueError("feedback_reaction_margin must be non-negative")
-        if self.feedback_gamma is not None and not 0.0 < self.feedback_gamma <= 0.15:
-            raise ValueError("feedback_gamma must be in (0, 0.15] when provided")
+        if self.feedback_gamma is not None and not 0.0 < self.feedback_gamma <= self.gamma_upper:
+            raise ValueError(
+                "feedback_gamma must be within the configured gamma range"
+            )
         if (self.feedback_ttc_threshold is None) != (self.feedback_gamma is None):
             raise ValueError("TTC feedback requires both threshold and feedback_gamma")
         previous_time = -1.0
         for update_time, gamma in self.gamma_schedule:
             if update_time < 0.0 or update_time < previous_time:
                 raise ValueError("gamma_schedule times must be non-negative and sorted")
-            if not 0.0 < gamma <= 0.15:
-                raise ValueError("scheduled gamma must be in (0, 0.15]")
+            if not 0.0 < gamma <= self.gamma_upper:
+                raise ValueError(
+                    "scheduled gamma must be within the configured gamma range"
+                )
             previous_time = update_time
 
 
@@ -313,6 +415,8 @@ class SmoothDynamicResult:
     final_gamma: float
     gamma_updates_applied: int
     gamma_updates_rejected: int
+    prediction_mode_updates_applied: int
+    final_prediction_mode: str
     reflex_interventions: int
     reflex_backups: int
     reflex_side_switches: int
@@ -329,6 +433,7 @@ class SmoothDynamicResult:
     solver_unknown_exits: int
     deadline_misses: int
     emergency_fallbacks: int
+    braking_fallbacks: int
     maximum_constraint_violation: float | None
     mean_model_transition_error: float
     max_model_transition_error: float
@@ -450,6 +555,83 @@ class ReferenceObstacleStage:
     robust_radius_next: float
 
 
+def braking_fallback_command(
+    position: Sequence[float],
+    velocity: Sequence[float],
+    stage: ReferenceObstacleStage,
+    *,
+    gamma: float,
+    dt: float,
+    braking_decay: float,
+    cbf_transition_mode: str,
+    input_limit: float,
+) -> tuple[tuple[float, float, float, float], bool]:
+    """Bounded braking command for a solver-rejection step, CBF-screened.
+
+    The braked command targets ``v_next = braking_decay * v`` within the
+    input limits and is accepted only when its one-step CBF residual against
+    the held obstacle measurement is non-negative; otherwise the frozen
+    fail-closed zero command is returned with ``engaged=False``.
+    """
+
+    import numpy as np
+
+    from .symbolic import barrier_value, discrete_cbf_value
+
+    if not 0.0 <= braking_decay < 1.0:
+        raise ValueError("braking_decay must be in [0, 1)")
+    if dt <= 0.0 or input_limit <= 0.0:
+        raise ValueError("dt and input_limit must be positive")
+    current_position = np.asarray(position, dtype=float).reshape(3)
+    current_velocity = np.asarray(velocity, dtype=float).reshape(3)
+    braked_velocity = braking_decay * current_velocity
+    if cbf_transition_mode == "double_integrator":
+        command = np.clip(
+            (braked_velocity - current_velocity) / dt, -input_limit, input_limit
+        )
+        next_position = (
+            current_position + dt * current_velocity + 0.5 * dt**2 * command
+        )
+    elif cbf_transition_mode == "command_velocity":
+        command = np.clip(braked_velocity, -input_limit, input_limit)
+        next_position = current_position + dt * command
+    elif cbf_transition_mode == "paper_state":
+        command = np.clip(braked_velocity, -input_limit, input_limit)
+        next_position = current_position + dt * current_velocity
+    elif cbf_transition_mode == "paper_increment":
+        # Non-paper velocity-increment variant (registry 1.1); the one-step
+        # position successor does not depend on the input.
+        command = np.clip(
+            braked_velocity - current_velocity, -input_limit, input_limit
+        )
+        next_position = current_position + dt * current_velocity
+    else:
+        raise ValueError(
+            "cbf_transition_mode must be paper_state, command_velocity, "
+            "double_integrator, or paper_increment"
+        )
+    h_current = barrier_value(
+        tuple(float(value) for value in current_position),
+        stage.obstacle_position,
+        stage.robust_radius,
+        0.0,
+    )
+    h_next = barrier_value(
+        tuple(float(value) for value in next_position),
+        stage.obstacle_next_position,
+        stage.robust_radius_next,
+        0.0,
+    )
+    if discrete_cbf_value(h_current, h_next, gamma) < 0.0:
+        return (0.0, 0.0, 0.0, 0.0), False
+    return (
+        float(command[0]),
+        float(command[1]),
+        float(command[2]),
+        0.0,
+    ), True
+
+
 class ReferenceObstacleTVP:
     """One TVP provider for the B-spline reference and held obstacle sensor."""
 
@@ -470,6 +652,11 @@ class ReferenceObstacleTVP:
         velocity_filter: float = 1.0,
         direct_target: bool = False,
         cbf_transition_mode: str = "paper_state",
+        cbf_constraint_scope: str = "horizon",
+        terminal_safe_set: bool = False,
+        dead_time_margin_mode: str = "off",
+        dead_time_speed_bound: float = 0.0,
+        gamma_upper: float = 0.15,
     ) -> None:
         import numpy as np
 
@@ -505,12 +692,26 @@ class ReferenceObstacleTVP:
             "paper_state",
             "command_velocity",
             "double_integrator",
+            "paper_increment",
         }:
             raise ValueError(
                 "cbf_transition_mode must be paper_state, command_velocity, "
-                "or double_integrator"
+                "double_integrator, or paper_increment"
             )
         self.cbf_transition_mode = cbf_transition_mode
+        if cbf_constraint_scope not in {"horizon", "first_step"}:
+            raise ValueError(
+                "cbf_constraint_scope must be horizon or first_step"
+            )
+        self.cbf_constraint_scope = cbf_constraint_scope
+        self.terminal_safe_set = bool(terminal_safe_set)
+        if dead_time_margin_mode not in {"off", "speed_bound"}:
+            raise ValueError("dead_time_margin_mode must be off or speed_bound")
+        self.dead_time_margin_mode = dead_time_margin_mode
+        self.dead_time_speed_bound = float(dead_time_speed_bound)
+        if not 0.0 < gamma_upper <= 1.0:
+            raise ValueError("gamma_upper must be in (0, 1]")
+        self.gamma_upper = float(gamma_upper)
         segment_lengths = np.linalg.norm(
             np.diff(self.reference_path, axis=0), axis=1
         )
@@ -524,13 +725,53 @@ class ReferenceObstacleTVP:
         self._robust_radius_next_tvp = None
         self._reference_tvp = None
         self._gamma_tvp = None
+        self._cbf_active_tvp = None
+        self._terminal_safe_active_tvp = None
+
+    def cbf_active_at_stage(self, stage: int) -> float:
+        """Gate value for the CBF constraint at horizon stage ``stage``.
+
+        Under ``first_step`` (hard one-step D-GCBF, Zeng et al. CDC 2021
+        precedent) only stage 0 carries the barrier constraint; later stages
+        receive a trivially satisfied inequality.
+        """
+
+        if stage < 0:
+            raise ValueError("stage must be non-negative")
+        if self.cbf_constraint_scope == "first_step" and stage > 0:
+            return 0.0
+        return 1.0
+
+    def terminal_safe_active_at_stage(self, stage: int) -> float:
+        """Gate for the reconstructed terminal set ``h(p_N) >= 0``.
+
+        The constraint is attached at stage ``N-1``, where the successor
+        expression evaluates the terminal position ``p_N``.
+        """
+
+        if stage < 0:
+            raise ValueError("stage must be non-negative")
+        return 1.0 if stage == self.horizon - 1 else 0.0
 
     def update_gamma(self, gamma: float) -> None:
         """Hot-swap an LLM-selected safety parameter without rebuilding MPC."""
 
-        if not 0.0 < gamma <= 0.15:
-            raise ValueError("gamma must be in the experimental interval (0, 0.15]")
+        if not 0.0 < gamma <= self.gamma_upper:
+            raise ValueError("gamma must be within the configured gamma range")
         self.gamma = float(gamma)
+
+    def update_prediction_mode(self, mode: str) -> None:
+        """Channel-2 feedback: hot-swap the obstacle prediction mode.
+
+        The constant-velocity observer (``self.observer``) is updated on
+        every sensor measurement regardless of the active prediction
+        mode, so a switch into ``velocity_tube`` is never cold-started --
+        it inherits whatever velocity estimate has accumulated so far.
+        """
+
+        if mode not in {"static", "velocity", "velocity_tube"}:
+            raise ValueError("prediction mode must be static, velocity, or velocity_tube")
+        self.prediction_mode = mode
 
     def update_safety_profile(
         self, *, gamma: float, clearance_margin: float, speed_scale: float
@@ -607,6 +848,16 @@ class ReferenceObstacleTVP:
             "_tvp", "reference_state", shape=(8, 1)
         )
         self._gamma_tvp = model.set_variable("_tvp", "cbf_gamma", shape=(1, 1))
+        # The gate variable is declared only for the opt-in one-step profile
+        # so the frozen full-horizon baseline model stays byte-identical.
+        if self.safety_mode == "cbf" and self.cbf_constraint_scope == "first_step":
+            self._cbf_active_tvp = model.set_variable(
+                "_tvp", "cbf_active", shape=(1, 1)
+            )
+        if self.safety_mode == "cbf" and self.terminal_safe_set:
+            self._terminal_safe_active_tvp = model.set_variable(
+                "_tvp", "terminal_safe_active", shape=(1, 1)
+            )
 
     def prediction_at_stage(self, stage: int) -> ReferenceObstacleStage:
         """Return the exact TVPs assigned to ``stage`` by :meth:`configure`.
@@ -697,6 +948,12 @@ class ReferenceObstacleTVP:
             obstacle_next_position = obstacle_position
             robust_radius = self.base_combined_radius + self.clearance_margin
             robust_radius_next = robust_radius
+            if self.dead_time_margin_mode == "speed_bound":
+                # ZOCBF-style dead-time robustness: the held measurement can
+                # be stale by ``stage_age``; any bounded obstacle motion stays
+                # inside the inflated ball, so safety holds between samples.
+                robust_radius += self.dead_time_speed_bound * stage_age
+                robust_radius_next += self.dead_time_speed_bound * next_age
         return ReferenceObstacleStage(
             reference_state=tuple(float(value) for value in reference_state),
             obstacle_position=tuple(float(value) for value in obstacle_position),
@@ -755,11 +1012,24 @@ class ReferenceObstacleTVP:
                 if "cbf_decay" in model.u.keys()
                 else 1.0
             )
+            cbf_expression = decay * (1.0 - self._gamma_tvp) * h_current - h_next
+            if "cbf_slack" in model.u.keys():
+                # Soft constraint: violation is bounded by the slack input,
+                # which the L1 exact penalty keeps at zero when feasible.
+                cbf_expression = cbf_expression - model.u["cbf_slack"]
+            if self._cbf_active_tvp is not None:
+                cbf_expression = self._cbf_active_tvp * cbf_expression
             mpc.set_nl_cons(
                 "dynamic_obstacle_cbf",
-                decay * (1.0 - self._gamma_tvp) * h_current - h_next,
+                cbf_expression,
                 ub=0.0,
             )
+            if self._terminal_safe_active_tvp is not None:
+                mpc.set_nl_cons(
+                    "terminal_safe_set",
+                    self._terminal_safe_active_tvp * (-h_next),
+                    ub=0.0,
+                )
         elif self.safety_mode == "distance":
             mpc.set_nl_cons("dynamic_obstacle_distance", -h_next, ub=0.0)
         template = mpc.get_tvp_template()
@@ -784,6 +1054,14 @@ class ReferenceObstacleTVP:
                     np.asarray(prediction.reference_state).reshape(8, 1)
                 )
                 template["_tvp", stage, "cbf_gamma"] = self.gamma
+                if self._cbf_active_tvp is not None:
+                    template["_tvp", stage, "cbf_active"] = (
+                        self.cbf_active_at_stage(stage)
+                    )
+                if self._terminal_safe_active_tvp is not None:
+                    template["_tvp", stage, "terminal_safe_active"] = (
+                        self.terminal_safe_active_at_stage(stage)
+                    )
             return template
 
         mpc.set_tvp_fun(tvp_fun)
@@ -869,6 +1147,7 @@ def run_smooth_dynamic_demo(
     action_tracking_errors: list[float] = []
     solver_audits: list[dict[str, Any]] = []
     solver_failures = 0
+    braking_fallbacks = 0
     solver_rejections = 0
     solver_termination_counts: dict[str, int] = {}
     emergency_fallbacks = 0
@@ -921,8 +1200,8 @@ def run_smooth_dynamic_demo(
             error_bound=cfg.measurement_error_bound,
         )
         dynamics_mode = (
-            "double_integrator"
-            if cfg.cbf_transition_mode == "double_integrator"
+            cfg.cbf_transition_mode
+            if cfg.cbf_transition_mode in {"double_integrator", "paper_increment"}
             else "paper_state"
         )
         mpc_config = PaperMPCConfig(
@@ -931,6 +1210,7 @@ def run_smooth_dynamic_demo(
             linear_jerk_weight=cfg.jerk_weight,
             optimal_decay_weight=cfg.optimal_decay_weight,
             optimal_decay_lower=cfg.optimal_decay_lower,
+            cbf_slack_weight=cfg.cbf_slack_weight,
             target_tvp_name="reference_state",
             dynamics_mode=dynamics_mode,
         )
@@ -971,6 +1251,11 @@ def run_smooth_dynamic_demo(
             velocity_filter=cfg.velocity_filter,
             direct_target=cfg.reference_mode == "direct_target",
             cbf_transition_mode=cfg.cbf_transition_mode,
+            cbf_constraint_scope=cfg.cbf_constraint_scope,
+            terminal_safe_set=cfg.terminal_safe_set_enabled,
+            dead_time_margin_mode=cfg.dead_time_margin_mode,
+            dead_time_speed_bound=cfg.dead_time_obstacle_speed_bound,
+            gamma_upper=cfg.gamma_upper,
         )
         if cfg.known_obstacle_velocity:
             tvp.observer.velocity = tuple(float(value) for value in obstacle_velocity)
@@ -998,13 +1283,17 @@ def run_smooth_dynamic_demo(
             mpc_config,
             model_builders=(tvp.declare,),
             constraint_builders=(tvp.configure,),
-            nlpsol_options=IpoptConfig(
-                constraint_violation_tolerance=(
-                    cfg.solver_max_constraint_violation
-                    if cfg.solver_max_constraint_violation > 0.0
-                    else 1e-12
-                ),
-                max_cpu_time=cfg.solver_max_cpu_time,
+            nlpsol_options=(
+                IpoptConfig.reference_defaults()
+                if cfg.ipopt_profile == "reference_defaults"
+                else IpoptConfig(
+                    constraint_violation_tolerance=(
+                        cfg.solver_max_constraint_violation
+                        if cfg.solver_max_constraint_violation > 0.0
+                        else 1e-12
+                    ),
+                    max_cpu_time=cfg.solver_max_cpu_time,
+                )
             ).casadi_options(),
         )
         reflex = OperationalSpaceSafetyReflex(
@@ -1065,8 +1354,12 @@ def run_smooth_dynamic_demo(
         next_sensor_time = cfg.sensor_period
         last_measurement_time = 0.0
         schedule_index = 0
+        prediction_schedule_index = 0
+        applied_prediction_mode_updates: list[dict[str, Any]] = []
         gamma_queue = GammaUpdateQueue()
-        gamma_store = AtomicGammaStore(cfg.gamma, clock_skew_tolerance=0.0)
+        gamma_store = AtomicGammaStore(
+            cfg.gamma, clock_skew_tolerance=0.0, gamma_upper=cfg.gamma_upper
+        )
         applied_gamma_updates: list[dict[str, float]] = []
         rejected_gamma_updates = 0
         gamma_trace: list[float] = []
@@ -1134,6 +1427,30 @@ def run_smooth_dynamic_demo(
                 else:
                     feedback_updates_rejected_late += 1
                 ttc_feedback_published = True
+            while (
+                prediction_schedule_index < len(cfg.prediction_mode_schedule)
+                and elapsed + 1e-12
+                >= cfg.prediction_mode_schedule[prediction_schedule_index][0]
+            ):
+                switch_time, new_mode = cfg.prediction_mode_schedule[
+                    prediction_schedule_index
+                ]
+                request_time = (
+                    cfg.prediction_mode_schedule_request_times[
+                        prediction_schedule_index
+                    ]
+                    if cfg.prediction_mode_schedule_request_times
+                    else switch_time
+                )
+                tvp.update_prediction_mode(new_mode)
+                applied_prediction_mode_updates.append(
+                    {
+                        "requested_time": request_time,
+                        "applied_time": elapsed,
+                        "mode": new_mode,
+                    }
+                )
+                prediction_schedule_index += 1
             while (
                 schedule_index < len(cfg.gamma_schedule)
                 and elapsed + 1e-12 >= cfg.gamma_schedule[schedule_index][0]
@@ -1319,7 +1636,7 @@ def run_smooth_dynamic_demo(
                         **asdict(profile),
                     }
                 )
-            if cfg.cbf_transition_mode == "double_integrator":
+            if cfg.cbf_transition_mode in {"double_integrator", "paper_increment"}:
                 feedback_velocity = double_integrator_velocity[:3].copy()
                 feedback_yaw_velocity = float(double_integrator_velocity[3])
             else:
@@ -1340,7 +1657,11 @@ def run_smooth_dynamic_demo(
             ).reshape(-1)
             measured_solve_time = perf_counter() - started
             solve_times.append(measured_solve_time)
-            expected_dimension = 5 if mpc_config.uses_optimal_decay else 4
+            expected_dimension = (
+                4
+                + int(mpc_config.uses_optimal_decay)
+                + int(mpc_config.uses_cbf_slack)
+            )
             diagnostics = diagnostics_from_do_mpc(
                 mpc, measured_solve_time=measured_solve_time
             )
@@ -1369,7 +1690,21 @@ def run_smooth_dynamic_demo(
             if rejected_candidate:
                 solver_rejections += 1
                 emergency_fallbacks += 1
-                candidate = np.zeros(4, dtype=float)
+                if cfg.solver_fallback_mode == "brake":
+                    fallback_command, braking_engaged = braking_fallback_command(
+                        position,
+                        feedback_velocity,
+                        tvp.prediction_at_stage(0),
+                        gamma=tvp.gamma,
+                        dt=mpc_config.dt,
+                        braking_decay=cfg.fallback_braking_decay,
+                        cbf_transition_mode=cfg.cbf_transition_mode,
+                        input_limit=mpc_config.linear_input_limit,
+                    )
+                    braking_fallbacks += int(braking_engaged)
+                    candidate = np.asarray(fallback_command, dtype=float)
+                else:
+                    candidate = np.zeros(4, dtype=float)
             else:
                 candidate = np.asarray(accepted[:4], dtype=float)
             for violation in violation_profile.violations:
@@ -1409,7 +1744,8 @@ def run_smooth_dynamic_demo(
             reflex_intervened = False
             reflex_backup_used = False
             if (
-                cfg.cbf_transition_mode != "double_integrator"
+                cfg.cbf_transition_mode
+                not in {"double_integrator", "paper_increment"}
                 and (
                     cfg.safety_reflex_enabled
                     or safety_lifecycle.requires_reflex
@@ -1498,7 +1834,7 @@ def run_smooth_dynamic_demo(
             pre_step_obstacle = true_obstacle.copy()
             applied_gamma = float(tvp.gamma)
             applied_decay = float(optimal_decay_trace[-1])
-            if cfg.cbf_transition_mode == "double_integrator":
+            if cfg.cbf_transition_mode in {"double_integrator", "paper_increment"}:
                 model_state = np.concatenate(
                     [pre_step_position, [0.0], double_integrator_velocity]
                 )
@@ -1507,7 +1843,7 @@ def run_smooth_dynamic_demo(
                         model_state,
                         candidate,
                         dt=mpc_config.dt,
-                        mode="double_integrator",
+                        mode=cfg.cbf_transition_mode,
                     ),
                     dtype=float,
                 )
@@ -1529,7 +1865,8 @@ def run_smooth_dynamic_demo(
                     if formal_filter is not None
                     else (
                         cfg.robot_velocity_maximum
-                        if cfg.cbf_transition_mode == "double_integrator"
+                        if cfg.cbf_transition_mode
+                        in {"double_integrator", "paper_increment"}
                         else mpc_config.linear_input_limit
                     )
                 ),
@@ -1782,6 +2119,8 @@ def run_smooth_dynamic_demo(
             gamma_updates_rejected=(
                 rejected_gamma_updates + feedback_updates_rejected_late
             ),
+            prediction_mode_updates_applied=len(applied_prediction_mode_updates),
+            final_prediction_mode=tvp.prediction_mode,
             reflex_interventions=len(reflex_audits),
             reflex_backups=sum(int(item["backup_used"]) for item in reflex_audits),
             reflex_side_switches=reflex.side_switches,
@@ -1810,6 +2149,7 @@ def run_smooth_dynamic_demo(
                 solve_time > cfg.control_deadline for solve_time in solve_times
             ),
             emergency_fallbacks=emergency_fallbacks,
+            braking_fallbacks=braking_fallbacks,
             maximum_constraint_violation=(
                 float(max(constraint_violations)) if constraint_violations else None
             ),
@@ -1885,6 +2225,7 @@ def run_smooth_dynamic_demo(
                 ),
             },
             "applied_gamma_updates": applied_gamma_updates,
+            "applied_prediction_mode_updates": applied_prediction_mode_updates,
             "gamma_trace": gamma_trace,
             "context_profile_trace": context_profile_trace,
             "runtime_trace": runtime_trace,

@@ -32,7 +32,7 @@ The implementation was inspected at repository revisions
 3. `robust_stack_async_feedback` versus `robust_stack_fixed_g015` is retained as
    a secondary analysis and cannot satisfy the paper-claim efficacy gate.
 4. Every CBF rollout now records the raw true barrier and applied residual
-   `h_true[k+1] - omega[k](1-gamma[k])h_true[k]`.
+   `h_true[k+1] - omega[k] * (1-gamma[k]) * h_true[k]`.
 5. Stepwise formal eligibility requires initial safety, no raw residual
    violation, exact or deterministically bounded observation, unchanged
    accepted MPC input, and verified model/action matching.

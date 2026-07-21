@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "profile": "safe_panda_core_scenarios_150_plan",
+  "status": "preregistered_2026-07-19",
+  "coordinate_frame": {
+    "origin": "seeded PandaReachSafe-v3 end-effector position",
+    "axes": {
+      "x": "lateral",
+      "y": "goal-forward",
+      "z": "up"
+    },
+    "goal_contract": "ee_reach_only",
+    "whole_arm_collision_certificate": false
+  },
+  "runtime": {
+    "environment_id": "PandaReachSafe-v3",
+    "safe_panda_commit": "c2c2bae9ee0b738fd7c5a5f6259a3a37da95718c",
+    "renderer": "Tiny",
+    "control_period_s": 0.04,
+    "prediction_horizon_steps": 15,
+    "maximum_steps": 260,
+    "reference_mode": "direct_target",
+    "cbf_transition_mode": "double_integrator",
+    "fixed_gamma": 0.15,
+    "ee_collision_radius_m": 0.035,
+    "sensing_period_s": 0.67,
+    "sensing_hold": "zero_order_hold",
+    "measurement_noise": "independent Gaussian position noise at sensing updates"
+  },
+  "sampling": {
+    "method": "latin_hypercube",
+    "episodes_per_scenario": 120,
+    "scenario_count": 1,
+    "total_episodes_per_method": 120,
+    "seed_base": 20460716,
+    "scenario_seed_stride": 10000,
+    "measurement_seed_offset": 500000,
+    "freeze_resolved_instances_before_execution": true,
+    "resolved_instance_path": "configs/cs1_confirmatory_120_instances.json",
+    "balanced_categorical_rule": "exactly 25 episodes per side for signed left/right fields",
+    "seed_block_rationale": "far from original geometry block 20260716-20270715 and its +500000 measurement offset; new measurement block 20960716+ collides with nothing"
+  },
+  "scenario_families": [
+    {
+      "id": "CS1_HEAD_ON_CLOSURE",
+      "name": "Head-on closing obstacle",
+      "objective": "Measure direct-path safety and solver feasibility when one obstacle approaches along the goal axis.",
+      "perturbations": {
+        "goal_x_m": {
+          "distribution": "uniform",
+          "low": -0.015,
+          "high": 0.015
+        },
+        "goal_y_m": {
+          "distribution": "uniform",
+          "low": 0.28,
+          "high": 0.32
+        },
+        "goal_z_m": {
+          "distribution": "uniform",
+          "low": -0.01,
+          "high": 0.015
+        },
+        "obstacle_start_x_m": {
+          "distribution": "uniform",
+          "low": -0.02,
+          "high": 0.02
+        },
+        "obstacle_start_y_m": {
+          "distribution": "uniform",
+          "low": 0.38,
+          "high": 0.48
+        },
+        "obstacle_start_z_m": {
+          "distribution": "uniform",
+          "low": -0.015,
+          "high": 0.02
+        },
+        "obstacle_velocity_x_mps": {
+          "distribution": "uniform",
+          "low": -0.01,
+          "high": 0.01
+        },
+        "obstacle_velocity_y_mps": {
+          "distribution": "uniform",
+          "low": -0.2,
+          "high": -0.05
+        },
+        "obstacle_velocity_z_mps": {
+          "distribution": "uniform",
+          "low": -0.005,
+          "high": 0.005
+        },
+        "obstacle_radius_m": {
+          "distribution": "uniform",
+          "low": 0.075,
+          "high": 0.11
+        },
+        "measurement_noise_sigma_m": {
+          "distribution": "uniform",
+          "low": 0.003,
+          "high": 0.008
+        },
+        "feedback_intervention_time_s": {
+          "distribution": "uniform",
+          "low": 0.1,
+          "high": 0.3,
+          "use": "optional paired feedback phase only"
+        }
+      }
+    }
+  ],
+  "preflight_constraints": {
+    "initial_true_clearance_min_m": 0.03,
+    "goal_in_inflated_obstacle_forbidden": true,
+    "predicted_encounter_required": true,
+    "predicted_closest_approach_upper_m": 0.06,
+    "workspace_bounds_relative_m": {
+      "x": [
+        -0.35,
+        0.35
+      ],
+      "y": [
+        -0.05,
+        0.5
+      ],
+      "z": [
+        -0.05,
+        0.2
+      ]
+    },
+    "finite_values_required": true,
+    "maximum_sampling_attempts_per_episode": 1000
+  },
+  "execution": {
+    "mandatory_phase": {
+      "method": "safe_panda_core_fixed_g015",
+      "provider_requests": 0,
+      "expected_rows": 150
+    },
+    "optional_paired_phase": {
+      "methods": [
+        "safe_panda_core_fixed_g015",
+        "safe_panda_core_contextual_feedback"
+      ],
+      "reuse_exact_resolved_instances": true,
+      "expected_rows": 300,
+      "provider_spend_gate": "allowed only after mandatory feasibility and integrity gates pass"
+    },
+    "planned_prepare_command": "PYTHONPATH=src .venv/bin/python scripts/prepare_safe_panda_core_scenarios.py",
+    "planned_run_command": "PYTHONPATH=src .venv/bin/python scripts/run_safe_panda_core_scenarios.py",
+    "output_dir": "artifacts/safe_panda_core_scenarios_150",
+    "resume_checkpoint": "run_checkpoint.json"
+  },
+  "metrics": {
+    "primary": "collision_free_goal_success",
+    "secondary": [
+      "collision",
+      "minimum_true_clearance_m",
+      "minimum_observed_clearance_m",
+      "minimum_true_cbf_residual",
+      "steps_to_goal",
+      "final_goal_distance_m",
+      "solver_failures",
+      "solver_rejections",
+      "deadline_misses",
+      "emergency_fallbacks",
+      "path_length_m",
+      "control_effort",
+      "model_transition_error_m"
+    ]
+  },
+  "outputs": {
+    "preflight_summary": "artifacts/safe_panda_core_scenarios_150/preflight_summary.json",
+    "episodes": "artifacts/safe_panda_core_scenarios_150/episodes.csv",
+    "summary": "artifacts/safe_panda_core_scenarios_150/benchmark_summary.json",
+    "checkpoint": "artifacts/safe_panda_core_scenarios_150/run_checkpoint.json"
+  },
+  "derived_from": "configs/safe_panda_core_scenarios_150_plan.json (v1, ranges and gates identical)",
+  "confirmatory_profile": "cs1_confirmatory_120_plan_v1",
+  "preregistration": "configs/cs1_confirmatory_prereg_v1.md"
+}

@@ -1,7 +1,0 @@
-label,gamma,outcome,success,collision,steps,minimum_true_clearance_m
-gamma=0.001,0.001,safety_timeout,False,False,260,0.08258106259445569
-gamma=0.040,0.04,goal,True,False,235,0.01272780306512758
-gamma=0.065,0.065,goal,True,False,233,0.0036455686056672265
-gamma=0.100,0.1,goal,True,False,226,0.0007548371175158664
-gamma=0.150,0.15,collision,False,True,142,-0.00022624087096834167
-baseline,,collision,False,True,74,-0.0005796800883975106

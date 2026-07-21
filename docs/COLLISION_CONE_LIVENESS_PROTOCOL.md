@@ -144,7 +144,7 @@ success is not confirmatory-500 evidence.
 ## Run
 
 ```bash
-PYTHONPATH=src python scripts/run_collision_cone_liveness_ablation.py \
+PYTHONPATH=src python scripts/archive/run_collision_cone_liveness_ablation.py \
   --episodes 20 --workers 4 --max-steps 140
 ```
 
@@ -154,6 +154,6 @@ not committed by default.
 Run the gated development stage with:
 
 ```bash
-PYTHONPATH=src python scripts/run_liveness_development.py \
+PYTHONPATH=src python scripts/archive/run_liveness_development.py \
   --episodes 100 --workers 4
 ```

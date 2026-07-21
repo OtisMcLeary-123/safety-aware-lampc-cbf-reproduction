@@ -9,6 +9,7 @@ build/
 dist/
 *.egg-info/
 .env
+.local/
 hftoken.txt
 nvidiatoken.txt
 results/
@@ -20,3 +21,24 @@ artifacts/*
 !artifacts/safe_panda_8d_double_integrator_50_benchmark/benchmark_summary.json
 !artifacts/safe_panda_8d_double_integrator_50_benchmark/episodes.csv
 artifacts/safe_panda_8d_double_integrator_50_contextual_nim_llama31/
+
+# Local credentials (never commit)
+semantic_scholar_api_approval.txt
+keys.env
+loop.run.yaml
+
+# GitHub Models PAT (local only, never committed)
+githubtk.txt
+
+# Internal research material kept local: manuscript drafts, submission
+# discussion, research journal, agent tooling, and repo-meta files that are
+# not part of the public reproduction record.
+docs/paper/
+paper/
+docs/RESEARCH_JOURNAL.md
+docs/IEEE_SUBMISSION_DISCUSSION.md
+.claude/
+AGENTS.md
+CITATION.cff
+CONTRIBUTING.md
+*.pdf

@@ -51,8 +51,8 @@ cloud LLM cannot act as a fast safety reflex for this short-horizon scene.
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python scripts/run_hard_scene_study.py
-PYTHONPATH=src python scripts/render_hard_scene_examples.py
+PYTHONPATH=src python scripts/archive/run_hard_scene_study.py
+PYTHONPATH=src python scripts/archive/render_hard_scene_examples.py
 ```
 
 The first command makes one LLM decision per unique prompt (or uses the

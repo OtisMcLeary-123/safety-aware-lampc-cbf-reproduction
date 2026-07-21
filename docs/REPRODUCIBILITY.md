@@ -50,12 +50,21 @@ These versions document this reproduction environment; the paper itself does not
 - The solver acceptance layer is fail-closed: missing diagnostics, infeasibility, excessive constraint residual, invalid action shape, or non-finite action values prevent application of the candidate control.
 - The paper input bound `[-0.2, 0.2]` is mapped linearly to Safe Panda's normalized Cartesian action interval `[-1, 1]`; the paper does not publish its simulator action adapter.
 
-## Remaining verification gates
+## Current validation boundary
 
-1. Select and validate the concrete Safe Panda task/environment schema for the paper's cube-picking scene.
-2. Connect the CBF constraint builder to the do-mpc controller for the selected observation schema.
-3. Run a deterministic closed-loop collision-avoidance episode, beyond the verified one-step environment smoke tests.
-4. Recreate the gamma sweep and compare minimum obstacle clearance qualitatively with Figure 5.
-5. Run 50-episode feedback/no-feedback ablations only after intervention timing and LLM latency policies are specified.
+- The Safe Panda adapter, controller, symbolic CBF, solver policy, and closed-loop
+  benchmark runners are implemented and covered by the project test suite.
+- The 8-D double-integrator benchmark and the separate 3-D extension have saved
+  aggregate results under their versioned setup manifests.
+- The gamma sweep is a single deterministic episode used as an illustration;
+  it is not a population-level ranking of decay values.
+- The 3-D provider benchmark uses NVIDIA NIM with
+  `meta/llama-3.1-8b-instruct` as an explicitly disclosed model substitution.
+  It does not validate the paper's GPT-4o/OpenAI claim.
+- The implementation remains an engineering reproduction because the paper does
+  not publish its exact scene geometry, prompts, reference generator, action
+  adapter, or raw controller traces.
 
-Until the first three remaining gates pass, the project is a validated component implementation, not a validated reproduction of the paper's results.
+Run `python -m pytest -q` after installation to verify the current software
+contract. Provider collection and generated animations are optional and are not
+required for the local test suite.

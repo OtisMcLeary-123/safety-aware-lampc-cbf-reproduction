@@ -1,0 +1,33 @@
+{
+  "profile_name": "cs1_confirmatory_nim_slack_v1",
+  "created": "2026-07-20",
+  "purpose": "Preregistered confirmatory run, arm B: checkpointed NIM feedback protocol on the soft-slack base, 120 new CS1 instances, zero new API requests.",
+  "method": "cs1_confirm_nim_slack",
+  "paired_against_methods": ["cs1_confirm_soft_slack"],
+  "instances": "configs/cs1_confirmatory_120_instances.json",
+  "instances_sha256": "aa07f70d98857984339c187e2da3f9738118ea3fd720300b43f1208ac205af7a",
+  "controller_base": {
+    "runner_kwargs_overrides": {
+      "prediction_mode": "velocity_tube",
+      "cbf_slack_weight": 1000.0
+    }
+  },
+  "provider": {
+    "name": "nvidia_nim",
+    "model": "meta/llama-3.1-8b-instruct",
+    "request_budget_max": 150,
+    "request_policy": "checkpoint replay only; expected zero new requests",
+    "checkpoint_dir": "artifacts/cs1_confirmatory_240/provider_checkpoints",
+    "replay_rule": "seeded from the original nim_feedback checkpoint"
+  },
+  "feedback_protocol": {
+    "user_utterance": "Watch out! I think it's going to crash soon.",
+    "utterance_source": "paper Table-4 ablation protocol, Section V-C",
+    "context_given_to_llm": "current gamma (0.15), task instruction, scene summary",
+    "gamma_output_range": "continuous (0, 1] per paper Tables 1-2",
+    "gamma_range_mode": "paper_continuous",
+    "application_time": "feedback_intervention_time_s + measured_api_latency_s",
+    "gamma_update_ttl_s": 10.4,
+    "invalid_output_policy": "recorded; episode keeps gamma 0.15"
+  }
+}

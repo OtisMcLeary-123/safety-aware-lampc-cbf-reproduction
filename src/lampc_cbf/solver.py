@@ -52,6 +52,29 @@ class IpoptConfig:
         if self.mu_strategy not in {"adaptive", "monotone"}:
             raise ValueError("mu_strategy must be 'adaptive' or 'monotone'")
 
+    @classmethod
+    def reference_defaults(cls) -> "IpoptConfig":
+        """Library-default IPOPT options as used by the reference repositories.
+
+        Verified 2026-07-17 at the pinned revisions: ``elena-ecn/mpc-cbf``
+        (do-mpc, no explicit solver options) and
+        ``HybridRobotics/NMPC-DCLF-DCBF`` cdc2021
+        (``sdpsettings('solver','ipopt','verbose',0)``) both run IPOPT at
+        library defaults. The paper publishes no options (deviation registry
+        entry 1.3), so this factory is the closest sourced reconstruction:
+        IPOPT defaults with output silenced and no CPU limit.
+        """
+
+        return cls(
+            tolerance=1e-8,
+            acceptable_tolerance=1e-6,
+            constraint_violation_tolerance=1e-4,
+            max_iterations=3000,
+            max_cpu_time=1e6,
+            mu_strategy="monotone",
+            warm_start=False,
+        )
+
     def casadi_options(self) -> dict[str, Any]:
         """Return options accepted by CasADi ``nlpsol`` and do-mpc."""
 

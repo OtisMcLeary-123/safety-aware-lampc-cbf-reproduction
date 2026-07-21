@@ -1,0 +1,13 @@
+{
+  "profile_name": "cs1_confirmatory_soft_slack_v1",
+  "created": "2026-07-20",
+  "purpose": "Preregistered confirmatory run, arm A (baseline): soft-slack fixed gamma 0.15 on the 120 new CS1 instances.",
+  "method": "cs1_confirm_soft_slack",
+  "instances": "configs/cs1_confirmatory_120_instances.json",
+  "instances_sha256": "aa07f70d98857984339c187e2da3f9738118ea3fd720300b43f1208ac205af7a",
+  "provider_requests": 0,
+  "runner_kwargs_overrides": {
+    "prediction_mode": "velocity_tube",
+    "cbf_slack_weight": 1000.0
+  }
+}

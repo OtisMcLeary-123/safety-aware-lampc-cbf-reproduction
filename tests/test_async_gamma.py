@@ -97,7 +97,25 @@ def test_async_worker_failure_never_changes_controller_parameter():
     assert store.snapshot() == (0.08, 0)
 
 
-@pytest.mark.parametrize("gamma", [0.0, -0.1, 0.151, float("nan")])
+@pytest.mark.parametrize("gamma", [0.0, -0.1, 1.001, float("nan")])
 def test_update_rejects_invalid_gamma(gamma):
+    # The dataclass enforces the absolute published bound (0, 1]; the
+    # configured interval is enforced by the store at apply time.
     with pytest.raises(ValueError):
         _update(gamma, 1)
+
+
+def test_store_rejects_updates_beyond_configured_upper():
+    from lampc_cbf.async_gamma import GammaUpdateQueue
+
+    queue = GammaUpdateQueue()
+    queue.publish(_update(0.151, 1))
+    store = AtomicGammaStore(0.08)  # default gamma_upper = 0.15
+    audit = store.apply_pending(queue, now=15.0)
+    assert audit.applied is None
+    assert store.snapshot() == (0.08, 0)
+
+    queue.publish(_update(0.151, 2))
+    wide = AtomicGammaStore(0.08, gamma_upper=1.0)
+    assert wide.apply_pending(queue, now=15.0).applied is not None
+    assert wide.snapshot()[0] == 0.151

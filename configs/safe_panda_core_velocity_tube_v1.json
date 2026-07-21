@@ -1,0 +1,22 @@
+{
+  "profile_name": "safe_panda_core_velocity_tube_v1",
+  "created": "2026-07-17",
+  "purpose": "Remedy arm 1 for the core 150-episode benchmark: constant-velocity obstacle propagation through the prediction horizon with the uncertainty tube, replacing the paper's static-horizon assumption. The tube contracts once the observer has two distinct sensor updates, so it is far tighter than the worst-case dead-time ball.",
+  "method": "safe_panda_core_velocity_tube",
+  "baseline_method": "safe_panda_core_fixed_g015",
+  "instances": "configs/safe_panda_core_scenarios_150_instances.json",
+  "instances_sha256": "e0f154604660f79d6dfb26d83ed5b60955b8977f991365a228e739ff8fededdf",
+  "provider_requests": 0,
+  "runner_kwargs_overrides": {
+    "prediction_mode": "velocity_tube"
+  },
+  "references": [
+    "arXiv:2208.03529 (propagating obstacle dynamics through the horizon)",
+    "arXiv:2304.01639 (MPC-CBF for moving obstacles)"
+  ],
+  "notes": [
+    "Velocity is estimated from the 0.67 s zero-order-hold measurements (known_obstacle_velocity stays false); before two distinct updates the tube uses the initial velocity error bound, so early-episode behavior is conservative and then tightens.",
+    "All tube parameters keep the SmoothDynamicConfig defaults (confidence_multiplier 3.0, velocity_error_bound 0.03, initial 0.20, model_error_growth 0.005, sampled-data margin on).",
+    "This is a deliberate deviation from the paper's static-horizon assumption (registry 2.1); the paper-faithful baseline remains the frozen arm."
+  ]
+}

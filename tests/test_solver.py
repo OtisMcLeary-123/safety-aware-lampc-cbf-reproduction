@@ -185,3 +185,16 @@ def test_optional_ipopt_smoke_problem() -> None:
 
     assert solution == pytest.approx(1.0, abs=1e-6)
     assert FeasibilityPolicy().accepts(result)
+
+
+def test_ipopt_reference_defaults_match_library_defaults() -> None:
+    config = IpoptConfig.reference_defaults()
+    options = config.casadi_options()
+
+    assert options["ipopt.tol"] == pytest.approx(1e-8)
+    assert options["ipopt.acceptable_tol"] == pytest.approx(1e-6)
+    assert options["ipopt.constr_viol_tol"] == pytest.approx(1e-4)
+    assert options["ipopt.max_iter"] == 3000
+    assert options["ipopt.max_cpu_time"] == pytest.approx(1e6)
+    assert options["ipopt.mu_strategy"] == "monotone"
+    assert "ipopt.warm_start_init_point" not in options

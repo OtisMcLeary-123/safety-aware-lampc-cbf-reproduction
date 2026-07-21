@@ -33,6 +33,11 @@ class BuildLDemoConfig:
     obstacle_velocity: tuple[float, float, float] = (0.0, 0.025, 0.0)
     sensor_period: float = 0.67
     measurement_noise_sigma: float = 0.005
+    # Dead-time margin for the held obstacle measurement (fix for the
+    # systematic descend-phase graze): the CBF radius grows by this speed
+    # bound times the measurement age plus stage offset. Must dominate
+    # |obstacle_velocity|.
+    dynamic_dead_time_speed_bound: float = 0.04
     user_instruction: str = "Build the four-cube L shape safely."
     llm_model: str = "not-used"
     llm_safety_level: int = 5
@@ -416,6 +421,7 @@ def run_build_l_mpc_cbf_demo(
                 gamma=active_gamma,
                 dt=mpc_config.dt,
                 horizon=mpc_config.horizon,
+                dead_time_speed_bound=cfg.dynamic_dead_time_speed_bound,
             )
             model_builders = (online_cbf.declare_tvp,)
             constraint_builders += (online_cbf.add_constraint,)
@@ -439,7 +445,14 @@ def run_build_l_mpc_cbf_demo(
                 break
             measured_state = np.concatenate([position, [0.0], previous_control])
             if online_cbf is not None and measured_obstacle is not None:
-                online_cbf.update_measurement(measured_obstacle)
+                measurement_age = (
+                    (total_steps - sensor_update_steps[-1]) * simulation_dt
+                    if sensor_update_steps
+                    else 0.0
+                )
+                online_cbf.update_measurement(
+                    measured_obstacle, age_s=max(0.0, measurement_age)
+                )
             started = perf_counter()
             candidate = np.asarray(
                 mpc.make_step(measured_state.reshape(-1, 1)), dtype=float

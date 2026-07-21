@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Safe Panda core scenario editor and preview." />
+    <title>Scenario Lab | Safe Panda</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/tools/scenario_editor/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <p class="eyebrow">SAFE PANDA / MPC-CBF</p>
+            <h1>Scenario Lab</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span class="status-chip"><span class="status-dot"></span><span id="planStatus">Loading plan</span></span>
+          <button class="button button-ghost" id="importButton" type="button">Import JSON</button>
+          <button class="button button-primary" id="exportButton" type="button">Export suite</button>
+          <input id="importInput" type="file" accept="application/json,.json" hidden />
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="scenario-rail" aria-label="Scenario families">
+          <div class="rail-heading">
+            <div>
+              <p class="eyebrow">CORE BENCHMARK</p>
+              <h2>Three families</h2>
+            </div>
+            <span class="count-badge" id="familyCount">--</span>
+          </div>
+          <div class="scenario-list" id="scenarioList" role="tablist" aria-label="Core scenarios"></div>
+          <div class="rail-footer">
+            <p class="eyebrow">RUN CONTRACT</p>
+            <div class="contract-row"><span>Episodes / family</span><strong id="episodeCount">--</strong></div>
+            <div class="contract-row"><span>Total planned</span><strong id="totalCount">--</strong></div>
+            <div class="contract-row"><span>Controller</span><strong>gamma 0.15</strong></div>
+          </div>
+        </aside>
+
+        <section class="stage" aria-label="Scenario preview">
+          <div class="stage-heading">
+            <div>
+              <p class="eyebrow" id="scenarioKicker">SCENARIO</p>
+              <h2 id="scenarioTitle">Loading…</h2>
+              <p class="stage-description" id="scenarioDescription"></p>
+            </div>
+            <div class="stage-tools">
+              <button class="icon-button" id="resetButton" type="button" title="Reset selected scenario">↺ <span>Reset</span></button>
+              <button class="icon-button" id="downloadButton" type="button" title="Download selected scenario">↓ <span>Scenario JSON</span></button>
+            </div>
+          </div>
+
+          <div class="preview-grid">
+            <article class="viewport-card viewport-card-wide">
+              <div class="viewport-header">
+                <div><span class="view-index">01</span><strong>Top projection</strong><span class="view-meta">x / y · metres</span></div>
+                <span class="view-pill" id="topState">NOMINAL REFERENCE</span>
+              </div>
+              <div class="viewport-canvas" id="topView" role="img" aria-label="Top projection of robot, goal, and obstacle"></div>
+            </article>
+            <article class="viewport-card">
+              <div class="viewport-header">
+                <div><span class="view-index">02</span><strong>Side projection</strong><span class="view-meta">y / z · metres</span></div>
+                <span class="view-pill view-pill-warm">HEIGHT + MOTION</span>
+              </div>
+              <div class="viewport-canvas" id="sideView" role="img" aria-label="Side projection showing obstacle height and vertical motion"></div>
+            </article>
+          </div>
+
+          <div class="timeline-card">
+            <div class="timeline-label"><span class="eyebrow">PREVIEW TIME</span><strong id="timeValue">0.00 s</strong></div>
+            <input id="timeSlider" type="range" min="0" max="3" step="0.01" value="0" aria-label="Preview time" />
+            <div class="timeline-scale"><span>t = 0</span><span>nominal path preview · not a simulator rollout</span><span>t = 3 s</span></div>
+          </div>
+
+          <div class="legend-row" aria-label="Preview legend">
+            <span><i class="legend-dot legend-robot"></i>Robot / EE</span>
+            <span><i class="legend-dot legend-goal"></i>Goal</span>
+            <span><i class="legend-dot legend-obstacle"></i>Obstacle</span>
+            <span><i class="legend-ring"></i>Inflated safety radius</span>
+            <span><i class="legend-line"></i>Velocity vector</span>
+          </div>
+        </section>
+
+        <aside class="inspector" aria-label="Scenario inspector">
+          <div class="inspector-heading">
+            <div>
+              <p class="eyebrow">INSPECTOR</p>
+              <h2>Scenario inputs</h2>
+            </div>
+            <span class="edit-badge">EDIT MODE</span>
+          </div>
+
+          <div class="preview-summary" id="previewSummary"></div>
+          <div class="side-field-group">
+            <div class="section-label"><span>Preview controls</span><span class="section-rule"></span></div>
+            <label class="toggle-row"><span><strong>Animate obstacle</strong><small>Loop the nominal motion preview</small></span><input id="animateToggle" type="checkbox" /><span class="toggle-ui"></span></label>
+            <label class="toggle-row"><span><strong>Show uncertainty</strong><small>Display measurement envelope</small></span><input id="uncertaintyToggle" type="checkbox" checked /><span class="toggle-ui"></span></label>
+            <label class="field-row"><span>Preview side</span><select id="sideSelect"><option value="-1">Left / negative x</option><option value="1">Right / positive x</option></select></label>
+          </div>
+          <div class="editor-fields" id="editorFields"></div>
+          <div class="inspector-footer">
+            <p><span class="footer-icon">i</span> Changes stay in the browser until you export. The preview is a geometric sketch, not a solver result.</p>
+            <button class="button button-primary button-full" id="copyCommandButton" type="button">Copy planned run command</button>
+            <span class="copy-feedback" id="copyFeedback" role="status" aria-live="polite"></span>
+          </div>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/tools/scenario_editor/app.js"></script>
+  </body>
+</html>

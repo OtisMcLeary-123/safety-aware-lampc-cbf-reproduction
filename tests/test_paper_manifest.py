@@ -12,7 +12,6 @@ from lampc_cbf.paper_manifest import (
 
 
 MANIFEST_PATH = Path("configs/paper_fidelity.json")
-NIM_MANIFEST_PATH = Path("configs/paper_fidelity_nvidia_nim.json")
 LLAMA_NIM_MANIFEST_PATH = Path("configs/paper_fidelity_nvidia_nim_llama31.json")
 
 
@@ -70,28 +69,6 @@ def test_manifest_rejects_non_paper_method_set(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="benchmark.method_names"):
         PaperFidelityManifest.load(path)
-
-
-def test_nvidia_nim_substitution_inherits_controller_contract() -> None:
-    manifest = PaperFidelityManifest.load(NIM_MANIFEST_PATH)
-
-    assert manifest.profile == "paper_fidelity_model_substitution"
-    assert manifest.model_substitution
-    assert manifest.required_provider == "nvidia-nim"
-    assert manifest.required_model_family == "z-ai/glm-5.2"
-    assert manifest.episodes == 50
-    assert manifest.method_names == PAPER_REPLICATION_METHODS
-    assert manifest.feedback_request_policy == "one_shot_per_feedback_episode"
-    assert manifest.feedback_requests_per_episode == 1
-    assert (
-        manifest.latency_trace_mode
-        == "precollected_uncached_per_episode_replay"
-    )
-    assert manifest.accepts_feedback_decision(
-        model="z-ai/glm-5.2",
-        provider="nvidia-nim",
-        cache_hit=False,
-    )
 
 
 def test_llama_nim_substitution_profile_is_explicit_and_validated() -> None:

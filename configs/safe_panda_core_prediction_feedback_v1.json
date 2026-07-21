@@ -1,0 +1,24 @@
+{
+  "profile_name": "safe_panda_core_prediction_feedback_v1",
+  "created": "2026-07-20",
+  "purpose": "Channel-2 feedback arm (language -> prediction, not language -> gamma). Base is IDENTICAL to the frozen static/hard-constraint baseline (safe_panda_core_fixed_g015): gamma stays fixed at 0.15 throughout, prediction_mode starts static, cbf_slack_weight 0. The ONLY difference from the baseline is a scripted mid-episode switch of prediction_mode from static to velocity_tube at the frozen per-instance feedback time. Directly comparable to safe_panda_core_scripted_feedback_v1 (which switches gamma instead, on the same base, same timing, and was proven outcome-inert: 150/150 concordant, p=1.0) -- this arm isolates whether routing feedback into the prediction channel instead of the gamma channel rescues the hard-constraint baseline.",
+  "method": "safe_panda_core_prediction_feedback",
+  "baseline_method": "safe_panda_core_fixed_g015",
+  "comparison_method": "safe_panda_core_scripted_feedback",
+  "instances": "configs/safe_panda_core_scenarios_150_instances.json",
+  "instances_sha256": "e0f154604660f79d6dfb26d83ed5b60955b8977f991365a228e739ff8fededdf",
+  "provider_requests": 0,
+  "script": [
+    {
+      "offset_s": 0.0,
+      "instruction": "It's coming fast -- predict ahead.",
+      "mode": "velocity_tube"
+    }
+  ],
+  "response_latency_s": 0.0,
+  "notes": [
+    "gamma is NEVER touched by this manifest; only prediction_mode changes, at the same frozen feedback_intervention_time_s used by the scripted gamma arm, so timing is held constant across both channel comparisons.",
+    "The constant-velocity observer already tracks obstacle velocity from every ZOH measurement regardless of prediction_mode, so the switch is never cold-started -- it inherits whatever estimate has accumulated by the feedback time.",
+    "No slack, no dead-time margin: this arm tests the prediction channel in isolation against the hard-constraint baseline, mirroring the scripted gamma arm's isolation of the gamma channel."
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "profile_name": "safe_panda_core_deadtime_margin_v1",
+  "created": "2026-07-17",
+  "purpose": "Remedy arm for the core 150-episode benchmark: ZOCBF-style dead-time-robust CBF margin on the static prediction profile. The constraint radius grows as speed_bound * (time since last measurement + stage offset), covering any bounded obstacle motion between the 0.67 s sensor updates.",
+  "method": "safe_panda_core_deadtime_margin",
+  "baseline_method": "safe_panda_core_fixed_g015",
+  "instances": "configs/safe_panda_core_scenarios_150_instances.json",
+  "instances_sha256": "e0f154604660f79d6dfb26d83ed5b60955b8977f991365a228e739ff8fededdf",
+  "provider_requests": 0,
+  "runner_kwargs_overrides": {
+    "dead_time_margin_mode": "speed_bound",
+    "dead_time_obstacle_speed_bound": 0.21
+  },
+  "references": [
+    "arXiv:2005.06418 (sampled-data CBF with input delays)",
+    "arXiv:2411.17079 (zero-order CBF: robustness terms guarantee safety between sampling instants)"
+  ],
+  "notes": [
+    "speed_bound 0.21 m/s dominates every scenario family's obstacle speed magnitude (max ~0.203 m/s across CS1-CS3).",
+    "Planning-side inflation only; true-clearance metrics keep the raw combined radius, and the frozen baseline profile is untouched (dead_time_margin_mode defaults to off).",
+    "Worst-case inflation at stage 15 just before a sensor update is ~0.21 * (0.67 + 0.60) = 0.267 m - feasibility stress is an expected, honestly reported outcome.",
+    "Gaussian measurement noise remains unbounded, so no formal bounded-error safety claim follows from this profile."
+  ]
+}

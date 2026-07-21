@@ -6,8 +6,10 @@ import numpy as np
 import pytest
 
 from lampc_cbf.smooth_dynamic_demo import (
+    ReferenceObstacleStage,
     ReferenceObstacleTVP,
     SmoothDynamicConfig,
+    braking_fallback_command,
     build_reference_route,
     classify_episode_outcome,
 )
@@ -153,6 +155,44 @@ def test_reference_progress_is_monotone() -> None:
     assert provider.progress_index == forward_index
 
 
+def test_prediction_mode_schedule_validation() -> None:
+    from lampc_cbf.smooth_dynamic_demo import SmoothDynamicConfig
+
+    config = SmoothDynamicConfig(
+        prediction_mode_schedule=((1.0, "velocity_tube"), (2.0, "static"))
+    )
+    assert config.prediction_mode_schedule[0] == (1.0, "velocity_tube")
+    with pytest.raises(ValueError, match="sorted"):
+        SmoothDynamicConfig(
+            prediction_mode_schedule=((2.0, "static"), (1.0, "velocity_tube"))
+        )
+    with pytest.raises(ValueError, match="valid mode"):
+        SmoothDynamicConfig(prediction_mode_schedule=((1.0, "bogus"),))
+    with pytest.raises(ValueError, match="request times"):
+        SmoothDynamicConfig(
+            prediction_mode_schedule=((1.0, "velocity_tube"),),
+            prediction_mode_schedule_request_times=(1.0, 2.0),
+        )
+
+
+def test_reference_provider_hot_swaps_prediction_mode() -> None:
+    import numpy as np
+
+    from lampc_cbf.smooth_dynamic_demo import ReferenceObstacleTVP
+
+    path = np.linspace([0.0, 0.0, 0.0], [0.0, 0.3, 0.0], 50)
+    provider = ReferenceObstacleTVP(
+        path, (0.0, 2.0, 1.0), reference_speed=0.1,
+        obstacle_radius=0.1, collision_radius=0.035,
+        gamma=0.1, dt=0.04, horizon=15, prediction_mode="static",
+    )
+    assert provider.prediction_mode == "static"
+    provider.update_prediction_mode("velocity_tube")
+    assert provider.prediction_mode == "velocity_tube"
+    with pytest.raises(ValueError, match="static, velocity, or velocity_tube"):
+        provider.update_prediction_mode("bogus")
+
+
 def test_reference_provider_hot_swaps_valid_gamma() -> None:
     path = np.column_stack(
         [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]
@@ -166,7 +206,7 @@ def test_reference_provider_hot_swaps_valid_gamma() -> None:
     provider.update_gamma(0.03)
 
     assert provider.gamma == pytest.approx(0.03)
-    with pytest.raises(ValueError, match="experimental interval"):
+    with pytest.raises(ValueError, match="configured gamma range"):
         provider.update_gamma(0.2)
 
 
@@ -203,6 +243,190 @@ def test_reference_provider_preserves_paper_transition_default() -> None:
     )
 
     assert provider.cbf_transition_mode == "paper_state"
+
+
+def test_dynamic_configuration_accepts_paper_increment_mode() -> None:
+    config = SmoothDynamicConfig(
+        cbf_transition_mode="paper_increment",
+        safety_reflex_enabled=False,
+        formal_safety_filter_enabled=False,
+    )
+    assert config.cbf_transition_mode == "paper_increment"
+    with pytest.raises(ValueError, match="reflex"):
+        SmoothDynamicConfig(cbf_transition_mode="paper_increment")
+
+
+def test_dynamic_configuration_validates_cbf_constraint_scope() -> None:
+    assert SmoothDynamicConfig().cbf_constraint_scope == "horizon"
+    assert (
+        SmoothDynamicConfig(cbf_constraint_scope="first_step").cbf_constraint_scope
+        == "first_step"
+    )
+    with pytest.raises(ValueError, match="cbf_constraint_scope"):
+        SmoothDynamicConfig(cbf_constraint_scope="last_step")
+
+
+def test_reference_provider_defaults_to_full_horizon_cbf_scope() -> None:
+    path = np.column_stack(
+        [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]
+    )
+    provider = ReferenceObstacleTVP(
+        path, (0.0, 2.0, 1.0), reference_speed=0.1,
+        obstacle_radius=0.1, collision_radius=0.035,
+        gamma=0.1, dt=0.04, horizon=15,
+    )
+
+    assert provider.cbf_constraint_scope == "horizon"
+    assert provider._cbf_active_tvp is None
+    assert all(
+        provider.cbf_active_at_stage(stage) == 1.0 for stage in range(16)
+    )
+
+
+def test_one_step_scope_gates_cbf_to_stage_zero() -> None:
+    path = np.column_stack(
+        [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]
+    )
+    provider = ReferenceObstacleTVP(
+        path, (0.0, 2.0, 1.0), reference_speed=0.1,
+        obstacle_radius=0.1, collision_radius=0.035,
+        gamma=0.1, dt=0.04, horizon=15,
+        cbf_constraint_scope="first_step",
+    )
+
+    assert provider.cbf_active_at_stage(0) == 1.0
+    assert all(
+        provider.cbf_active_at_stage(stage) == 0.0 for stage in range(1, 16)
+    )
+    with pytest.raises(ValueError, match="non-negative"):
+        provider.cbf_active_at_stage(-1)
+    with pytest.raises(ValueError, match="cbf_constraint_scope"):
+        ReferenceObstacleTVP(
+            path, (0.0, 2.0, 1.0), reference_speed=0.1,
+            obstacle_radius=0.1, collision_radius=0.035,
+            gamma=0.1, dt=0.04, horizon=15,
+            cbf_constraint_scope="everywhere",
+        )
+
+
+def test_terminal_safe_set_gates_only_the_final_stage() -> None:
+    path = np.column_stack(
+        [np.linspace(0.0, 1.0, 20), np.zeros(20), np.ones(20)]
+    )
+    provider = ReferenceObstacleTVP(
+        path, (0.0, 2.0, 1.0), reference_speed=0.1,
+        obstacle_radius=0.1, collision_radius=0.035,
+        gamma=0.1, dt=0.04, horizon=15,
+        terminal_safe_set=True,
+    )
+
+    assert provider.terminal_safe_set
+    assert provider.terminal_safe_active_at_stage(14) == 1.0
+    assert all(
+        provider.terminal_safe_active_at_stage(stage) == 0.0
+        for stage in range(16)
+        if stage != 14
+    )
+    default_provider = ReferenceObstacleTVP(
+        path, (0.0, 2.0, 1.0), reference_speed=0.1,
+        obstacle_radius=0.1, collision_radius=0.035,
+        gamma=0.1, dt=0.04, horizon=15,
+    )
+    assert not default_provider.terminal_safe_set
+    assert default_provider._terminal_safe_active_tvp is None
+    assert SmoothDynamicConfig().terminal_safe_set_enabled is False
+
+
+def test_dynamic_configuration_validates_solver_fallback_mode() -> None:
+    assert SmoothDynamicConfig().solver_fallback_mode == "zero"
+    assert (
+        SmoothDynamicConfig(solver_fallback_mode="brake").solver_fallback_mode
+        == "brake"
+    )
+    with pytest.raises(ValueError, match="solver_fallback_mode"):
+        SmoothDynamicConfig(solver_fallback_mode="coast")
+    with pytest.raises(ValueError, match="fallback_braking_decay"):
+        SmoothDynamicConfig(fallback_braking_decay=1.0)
+
+
+def _far_obstacle_stage() -> ReferenceObstacleStage:
+    return ReferenceObstacleStage(
+        reference_state=(0.0,) * 8,
+        obstacle_position=(5.0, 5.0, 5.0),
+        obstacle_next_position=(5.0, 5.0, 5.0),
+        robust_radius=0.135,
+        robust_radius_next=0.135,
+    )
+
+
+def test_braking_fallback_decays_velocity_when_safe() -> None:
+    command, engaged = braking_fallback_command(
+        (0.0, 0.0, 0.2),
+        (0.10, -0.04, 0.0),
+        _far_obstacle_stage(),
+        gamma=0.15,
+        dt=0.04,
+        braking_decay=0.5,
+        cbf_transition_mode="command_velocity",
+        input_limit=0.2,
+    )
+
+    assert engaged
+    assert command == pytest.approx((0.05, -0.02, 0.0, 0.0))
+
+
+def test_braking_fallback_fails_closed_when_cbf_screen_rejects() -> None:
+    # The held obstacle sits directly ahead inside the braked one-step path,
+    # so the residual is negative and the command must collapse to zero.
+    blocking_stage = ReferenceObstacleStage(
+        reference_state=(0.0,) * 8,
+        obstacle_position=(0.14, 0.0, 0.2),
+        obstacle_next_position=(0.10, 0.0, 0.2),
+        robust_radius=0.135,
+        robust_radius_next=0.135,
+    )
+
+    command, engaged = braking_fallback_command(
+        (0.0, 0.0, 0.2),
+        (0.2, 0.0, 0.0),
+        blocking_stage,
+        gamma=0.15,
+        dt=0.04,
+        braking_decay=0.5,
+        cbf_transition_mode="command_velocity",
+        input_limit=0.2,
+    )
+
+    assert not engaged
+    assert command == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_braking_fallback_double_integrator_respects_input_limit() -> None:
+    command, engaged = braking_fallback_command(
+        (0.0, 0.0, 0.2),
+        (0.4, 0.0, 0.0),
+        _far_obstacle_stage(),
+        gamma=0.15,
+        dt=0.04,
+        braking_decay=0.0,
+        cbf_transition_mode="double_integrator",
+        input_limit=0.2,
+    )
+
+    assert engaged
+    # Full stop would need -10 m/s^2; the command saturates at the limit.
+    assert command[0] == pytest.approx(-0.2)
+    with pytest.raises(ValueError, match="braking_decay"):
+        braking_fallback_command(
+            (0.0, 0.0, 0.2),
+            (0.1, 0.0, 0.0),
+            _far_obstacle_stage(),
+            gamma=0.15,
+            dt=0.04,
+            braking_decay=1.0,
+            cbf_transition_mode="command_velocity",
+            input_limit=0.2,
+        )
 
 
 def test_obstacle_tvp_current_next_indexing_is_contiguous() -> None:
