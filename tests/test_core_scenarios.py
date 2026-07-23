@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from lampc_cbf.core_scenarios import (
+    INSTANCES_PATH,
     PLAN_PATH,
     PreflightError,
     ScenarioInstance,
@@ -281,12 +282,14 @@ def test_scripted_schedule_is_deterministic_and_sorted(instances: list) -> None:
 
 
 def test_scripted_run_builds_valid_config_and_labels_method(
-    plan: dict, instances: list, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     from lampc_cbf.smooth_dynamic_demo import SmoothDynamicConfig
 
-    instance_file = tmp_path / "instances.json"
-    write_frozen_instances(instances, path=instance_file, plan_path=PLAN_PATH)
+    # Run against the committed frozen instance file that the feedback
+    # manifests are pinned to, so the test does not depend on the scipy/numpy
+    # sampler reproducing the same instances at runtime.
+    _, frozen_instances = load_frozen_instances(INSTANCES_PATH)
     captured: list[dict] = []
 
     def stub_runner(**kwargs):
@@ -295,10 +298,10 @@ def test_scripted_run_builds_valid_config_and_labels_method(
         return _StubResult()
 
     summary = run_core_benchmark(
-        instances_path=instance_file,
+        instances_path=INSTANCES_PATH,
         plan_path=PLAN_PATH,
         output_dir=tmp_path / "out",
-        episode_ids=smoke_episode_ids(instances),
+        episode_ids=smoke_episode_ids(frozen_instances),
         episode_runner=stub_runner,
         scripted_feedback_manifest=SCRIPTED_MANIFEST_PATH,
     )
@@ -425,12 +428,14 @@ def test_prediction_schedule_never_touches_gamma(instances: list) -> None:
 
 
 def test_prediction_feedback_run_isolates_the_prediction_channel(
-    plan: dict, instances: list, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     from lampc_cbf.smooth_dynamic_demo import SmoothDynamicConfig
 
-    instance_file = tmp_path / "instances.json"
-    write_frozen_instances(instances, path=instance_file, plan_path=PLAN_PATH)
+    # Run against the committed frozen instance file that the feedback
+    # manifests are pinned to, so the test does not depend on the scipy/numpy
+    # sampler reproducing the same instances at runtime.
+    _, frozen_instances = load_frozen_instances(INSTANCES_PATH)
     captured: list[dict] = []
 
     def stub_runner(**kwargs):
@@ -439,10 +444,10 @@ def test_prediction_feedback_run_isolates_the_prediction_channel(
         return _StubResult()
 
     summary = run_core_benchmark(
-        instances_path=instance_file,
+        instances_path=INSTANCES_PATH,
         plan_path=PLAN_PATH,
         output_dir=tmp_path / "out",
-        episode_ids=smoke_episode_ids(instances),
+        episode_ids=smoke_episode_ids(frozen_instances),
         episode_runner=stub_runner,
         prediction_feedback_manifest=PREDICTION_MANIFEST_PATH,
     )
